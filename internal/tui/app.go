@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"bitbucket-cli/internal/bitbucket"
@@ -17,6 +19,15 @@ type pane int
 const (
 	repoPane pane = iota
 	branchPane
+	prPane
+)
+
+type viewMode int
+
+const (
+	noSelection viewMode = iota
+	branchesView
+	prView
 )
 
 var (
@@ -47,10 +58,13 @@ type AppModel struct {
 	workspace         string
 	client            *bitbucket.Client
 	activePane        pane
+	currentView       viewMode
 	repositories      []domain.Repository
 	branches          []domain.Branch
+	pullRequests      []domain.PullRequest
 	repoCursor        int
 	branchCursor      int
+	prCursor          int
 	width             int
 	height            int
 	loading           bool
@@ -59,6 +73,7 @@ type AppModel struct {
 	filterMode        bool
 	repoFilterQuery   string
 	branchFilterQuery string
+	prFilterQuery     string
 }
 
 type reposLoadedMsg struct {
@@ -71,12 +86,18 @@ type branchesLoadedMsg struct {
 	err      error
 }
 
+type pullRequestsLoadedMsg struct {
+	prs []domain.PullRequest
+	err error
+}
+
 func NewApp(workspace string, cfg config.Config) AppModel {
 	return AppModel{
-		workspace:  workspace,
-		client:     bitbucket.NewClient(cfg),
-		activePane: repoPane,
-		loading:    true,
+		workspace:   workspace,
+		client:      bitbucket.NewClient(cfg),
+		activePane:  repoPane,
+		currentView: noSelection,
+		loading:     true,
 	}
 }
 
@@ -95,6 +116,31 @@ func loadBranches(client *bitbucket.Client, repoSlug string) tea.Cmd {
 	return func() tea.Msg {
 		branches, err := client.ListBranches(repoSlug)
 		return branchesLoadedMsg{branches: branches, err: err}
+	}
+}
+
+func loadPullRequests(client *bitbucket.Client, repoSlug string) tea.Cmd {
+	return func() tea.Msg {
+		prs, err := client.ListPullRequests(repoSlug)
+		return pullRequestsLoadedMsg{prs: prs, err: err}
+	}
+}
+
+func openURL(url string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "linux":
+			cmd = exec.Command("xdg-open", url)
+		case "darwin":
+			cmd = exec.Command("open", url)
+		case "windows":
+			cmd = exec.Command("cmd", "/c", "start", url)
+		default:
+			return nil
+		}
+		_ = cmd.Start()
+		return nil
 	}
 }
 
@@ -123,6 +169,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = ""
 		}
 
+	case pullRequestsLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading pull requests: %v", msg.err)
+		} else {
+			m.pullRequests = msg.prs
+			m.prCursor = 0
+			m.message = ""
+		}
+
 	case tea.KeyMsg:
 		m.message = ""
 
@@ -130,8 +186,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			currentFilter := &m.repoFilterQuery
 			currentCursor := &m.repoCursor
 			if m.activePane == branchPane {
-				currentFilter = &m.branchFilterQuery
-				currentCursor = &m.branchCursor
+				if m.currentView == branchesView {
+					currentFilter = &m.branchFilterQuery
+					currentCursor = &m.branchCursor
+				} else if m.currentView == prView {
+					currentFilter = &m.prFilterQuery
+					currentCursor = &m.prCursor
+				}
 			}
 
 			switch msg.String() {
@@ -171,7 +232,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "l":
+			if !m.filterMode && m.activePane == repoPane && m.currentView != noSelection {
+				m.activePane = branchPane
+			}
+
+		case "b":
 			if !m.filterMode && m.activePane == repoPane && len(m.getFilteredRepos()) > 0 {
+				m.currentView = branchesView
 				m.activePane = branchPane
 				m.loading = true
 				m.branches = nil
@@ -191,9 +258,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.repoCursor++
 					}
 				} else {
-					filtered := m.getFilteredBranches()
-					if m.branchCursor < len(filtered)-1 {
-						m.branchCursor++
+					if m.currentView == branchesView {
+						filtered := m.getFilteredBranches()
+						if m.branchCursor < len(filtered)-1 {
+							m.branchCursor++
+						}
+					} else if m.currentView == prView {
+						filtered := m.getFilteredPRs()
+						if m.prCursor < len(filtered)-1 {
+							m.prCursor++
+						}
 					}
 				}
 			}
@@ -205,17 +279,39 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.repoCursor--
 					}
 				} else {
-					if m.branchCursor > 0 {
-						m.branchCursor--
+					if m.currentView == branchesView {
+						if m.branchCursor > 0 {
+							m.branchCursor--
+						}
+					} else if m.currentView == prView {
+						if m.prCursor > 0 {
+							m.prCursor--
+						}
 					}
 				}
 			}
 
 		case "p":
-			if !m.filterMode && m.activePane == branchPane && len(m.getFilteredBranches()) > 0 {
-				filtered := m.getFilteredBranches()
-				selectedBranch := filtered[m.branchCursor].Name
-				m.message = fmt.Sprintf("Creating pull request for %s!", selectedBranch)
+			if !m.filterMode && m.activePane == repoPane && len(m.getFilteredRepos()) > 0 {
+				m.currentView = prView
+				m.activePane = branchPane
+				m.loading = true
+				m.pullRequests = nil
+				m.prFilterQuery = ""
+				m.prCursor = 0
+				repos := m.getFilteredRepos()
+				repo := repos[m.repoCursor]
+				m.selectedRepo = repo.Name
+				return m, loadPullRequests(m.client, repo.Slug)
+			}
+
+		case "o":
+			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
+				filtered := m.getFilteredPRs()
+				selectedPR := filtered[m.prCursor]
+				if selectedPR.URL != "" {
+					return m, openURL(selectedPR.URL)
+				}
 			}
 		}
 	}
@@ -229,7 +325,13 @@ func (m AppModel) View() string {
 	}
 
 	leftPane := m.renderRepoPane()
-	rightPane := m.renderBranchPane()
+
+	var rightPane string
+	if m.currentView == noSelection {
+		rightPane = ""
+	} else {
+		rightPane = m.renderRightPane()
+	}
 
 	content := lipgloss.JoinHorizontal(
 		lipgloss.Top,
@@ -237,11 +339,21 @@ func (m AppModel) View() string {
 		rightPane,
 	)
 
-	helpText := "h/l: switch panes  j/k/↑/↓: navigate  l: load branches  /: filter  p: create PR  q: quit"
+	helpText := "j/k/↑/↓: navigate  b: branches  p: pull requests  /: filter  q: quit"
+	if m.currentView != noSelection {
+		helpText = "h/l: switch panes  j/k/↑/↓: navigate  b: branches  p: pull requests  /: filter  q: quit"
+	}
+	if m.currentView == prView && m.activePane == branchPane {
+		helpText = "h/l: switch panes  j/k/↑/↓: navigate  o: open in browser  /: filter  q: quit"
+	}
 	if m.filterMode {
 		currentFilter := m.repoFilterQuery
 		if m.activePane == branchPane {
-			currentFilter = m.branchFilterQuery
+			if m.currentView == branchesView {
+				currentFilter = m.branchFilterQuery
+			} else if m.currentView == prView {
+				currentFilter = m.prFilterQuery
+			}
 		}
 		helpText = fmt.Sprintf("Filter: %s  (esc: cancel, enter: apply)", currentFilter)
 		helpText = activePaneStyle.Render(helpText)
@@ -259,8 +371,17 @@ func (m AppModel) View() string {
 	return fullContent
 }
 
+func (m AppModel) renderRightPane() string {
+	if m.currentView == branchesView {
+		return m.renderBranchPane()
+	} else if m.currentView == prView {
+		return m.renderPRPane()
+	}
+	return ""
+}
+
 func (m AppModel) renderRepoPane() string {
-	paneWidth := (m.width - 10) / 2
+	paneWidth := (m.width - 10) / 3
 	if paneWidth < 20 {
 		paneWidth = 20
 	}
@@ -325,9 +446,13 @@ func (m AppModel) renderRepoPane() string {
 }
 
 func (m AppModel) renderBranchPane() string {
-	paneWidth := (m.width - 10) / 2
-	if paneWidth < 20 {
-		paneWidth = 20
+	repoPaneWidth := (m.width - 10) / 3
+	if repoPaneWidth < 20 {
+		repoPaneWidth = 20
+	}
+	paneWidth := m.width - repoPaneWidth - 10
+	if paneWidth < 30 {
+		paneWidth = 30
 	}
 
 	availableHeight := m.height - 6
@@ -393,6 +518,110 @@ func (m AppModel) renderBranchPane() string {
 	return style.Render(content)
 }
 
+func (m AppModel) renderPRPane() string {
+	repoPaneWidth := (m.width - 10) / 3
+	if repoPaneWidth < 20 {
+		repoPaneWidth = 20
+	}
+	paneWidth := m.width - repoPaneWidth - 10
+	if paneWidth < 30 {
+		paneWidth = 30
+	}
+
+	availableHeight := m.height - 6
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+
+	title := "Pull Requests"
+	if m.selectedRepo != "" {
+		title = fmt.Sprintf("Pull Requests (%s)", m.selectedRepo)
+	}
+	if m.prFilterQuery != "" {
+		title = fmt.Sprintf("Pull Requests [/%s]", m.prFilterQuery)
+	}
+
+	if m.activePane == branchPane {
+		title = activePaneStyle.Render(title)
+	} else {
+		title = inactivePaneStyle.Render(title)
+	}
+
+	var items []string
+	items = append(items, title)
+	items = append(items, "")
+
+	if m.loading && m.activePane == branchPane && m.currentView == prView {
+		items = append(items, "Loading...")
+	} else if len(m.pullRequests) == 0 {
+		items = append(items, "No pull requests")
+	} else {
+		filtered := m.getFilteredPRs()
+		if len(filtered) == 0 {
+			items = append(items, "No matches")
+		} else {
+			start, end := m.calculateWindow(m.prCursor, len(filtered), availableHeight-2)
+
+			for i := start; i < end; i++ {
+				pr := filtered[i]
+				cursor := " "
+				if m.activePane == branchPane && i == m.prCursor {
+					cursor = cursorStyle.Render(">")
+				}
+
+				stateBadge := formatPRState(pr.State, pr.Draft)
+
+				authorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
+				author := authorStyle.Render(fmt.Sprintf("@%s", pr.Author))
+
+				const cursorIDStateAuthorPadding = 35
+				maxTitleWidth := paneWidth - cursorIDStateAuthorPadding - len(pr.Author)
+				prTitle := pr.Title
+				if len(prTitle) > maxTitleWidth {
+					prTitle = prTitle[:maxTitleWidth-3] + "..."
+				}
+
+				items = append(items, fmt.Sprintf("%s #%d %s %s %s", cursor, pr.ID, stateBadge, author, prTitle))
+			}
+
+			if start > 0 {
+				items[1] = inactivePaneStyle.Render("  ↑ more")
+			}
+			if end < len(filtered) {
+				items = append(items, inactivePaneStyle.Render("  ↓ more"))
+			}
+		}
+	}
+
+	content := strings.Join(items, "\n")
+	style := lipgloss.NewStyle().
+		Width(paneWidth).
+		Height(availableHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(0, 1)
+
+	return style.Render(content)
+}
+
+func formatPRState(state string, draft bool) string {
+	switch strings.ToLower(state) {
+	case "open":
+		if draft {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[DRAFT]")
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("[OPEN]")
+	case "merged":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Render("[MERGED]")
+	case "declined":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("[DECLINED]")
+	case "superseded":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[SUPERSEDED]")
+	default:
+		return fmt.Sprintf("[%s]", strings.ToUpper(state))
+	}
+}
+
 func (m AppModel) getFilteredRepos() []domain.Repository {
 	if m.repoFilterQuery == "" {
 		return m.repositories
@@ -419,6 +648,23 @@ func (m AppModel) getFilteredBranches() []domain.Branch {
 	for _, branch := range m.branches {
 		if strings.Contains(strings.ToLower(branch.Name), query) {
 			filtered = append(filtered, branch)
+		}
+	}
+	return filtered
+}
+
+func (m AppModel) getFilteredPRs() []domain.PullRequest {
+	if m.prFilterQuery == "" {
+		return m.pullRequests
+	}
+
+	var filtered []domain.PullRequest
+	query := strings.ToLower(m.prFilterQuery)
+	for _, pr := range m.pullRequests {
+		if strings.Contains(strings.ToLower(pr.Title), query) ||
+			strings.Contains(strings.ToLower(pr.Author), query) ||
+			strings.Contains(strings.ToLower(pr.SourceBranch), query) {
+			filtered = append(filtered, pr)
 		}
 	}
 	return filtered

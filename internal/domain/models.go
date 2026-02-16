@@ -12,6 +12,7 @@ type Repository struct {
 	Slug       string
 	UUID       string
 	Mainbranch string
+	UpdatedOn  string
 }
 
 type Branch struct {
@@ -22,4 +23,18 @@ type Branch struct {
 type BranchTarget struct {
 	Hash string
 	Date string
+}
+
+type PullRequest struct {
+	ID           int
+	Title        string
+	Description  string
+	State        string
+	Draft        bool
+	Author       string
+	SourceBranch string
+	DestBranch   string
+	CreatedOn    string
+	UpdatedOn    string
+	URL          string
 }
