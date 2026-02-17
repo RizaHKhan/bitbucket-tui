@@ -70,6 +70,7 @@ type AppModel struct {
 	loading           bool
 	message           string
 	selectedRepo      string
+	selectedRepoSlug  string
 	filterMode        bool
 	repoFilterQuery   string
 	branchFilterQuery string
@@ -223,17 +224,49 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
+		case "esc":
+			if m.activePane == branchPane {
+				m.activePane = repoPane
+			}
+
 		case "/":
 			m.filterMode = true
 
+		case "enter":
+			if !m.filterMode && m.activePane == repoPane && len(m.getFilteredRepos()) > 0 {
+				m.currentView = prView
+				m.activePane = branchPane
+				m.loading = true
+				m.pullRequests = nil
+				m.prFilterQuery = ""
+				m.prCursor = 0
+				repos := m.getFilteredRepos()
+				repo := repos[m.repoCursor]
+				m.selectedRepo = repo.Name
+				m.selectedRepoSlug = repo.Slug
+				return m, loadPullRequests(m.client, repo.Slug)
+			}
+
 		case "h":
-			if !m.filterMode {
-				m.activePane = repoPane
+			if !m.filterMode && m.activePane == branchPane && m.currentView == branchesView && m.selectedRepoSlug != "" {
+				m.currentView = prView
+				m.loading = true
+				m.pullRequests = nil
+				m.prFilterQuery = ""
+				m.prCursor = 0
+				return m, loadPullRequests(m.client, m.selectedRepoSlug)
 			}
 
 		case "l":
 			if !m.filterMode && m.activePane == repoPane && m.currentView != noSelection {
 				m.activePane = branchPane
+			} else if !m.filterMode && m.activePane == branchPane && m.currentView == prView && m.selectedRepoSlug != "" {
+				m.currentView = branchesView
+				m.loading = true
+				m.branches = nil
+				m.branchFilterQuery = ""
+				m.branchCursor = 0
+				return m, loadBranches(m.client, m.selectedRepoSlug)
 			}
 
 		case "b":
@@ -247,6 +280,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repos := m.getFilteredRepos()
 				repo := repos[m.repoCursor]
 				m.selectedRepo = repo.Name
+				m.selectedRepoSlug = repo.Slug
 				return m, loadBranches(m.client, repo.Slug)
 			}
 
@@ -302,6 +336,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repos := m.getFilteredRepos()
 				repo := repos[m.repoCursor]
 				m.selectedRepo = repo.Name
+				m.selectedRepoSlug = repo.Slug
 				return m, loadPullRequests(m.client, repo.Slug)
 			}
 
@@ -346,12 +381,12 @@ func (m AppModel) View() string {
 		content = m.renderRightPane()
 	}
 
-	helpText := "j/k/↑/↓: navigate  b: branches  p: pull requests  /: filter  q: quit"
+	helpText := "j/k/↑/↓: navigate  enter: select repo  /: filter  q: quit"
 	if m.currentView != noSelection {
-		helpText = "h/l: switch panes  j/k/↑/↓: navigate  b: branches  p: pull requests  /: filter  q: quit"
+		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  /: filter  q: quit"
 	}
 	if m.currentView == prView && m.activePane == branchPane {
-		helpText = "h/l: switch panes  j/k/↑/↓: navigate  o: open in browser  /: filter  q: quit"
+		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  o: open in browser  /: filter  q: quit"
 	}
 	if m.filterMode {
 		currentFilter := m.repoFilterQuery
@@ -385,6 +420,29 @@ func (m AppModel) renderRightPane() string {
 		return m.renderPRPane()
 	}
 	return ""
+}
+
+func (m AppModel) renderRightTabs() string {
+	baseTab := lipgloss.NewStyle().Padding(0, 2)
+
+	activeTab := baseTab.
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color("42")).
+		Bold(true)
+
+	inactiveTab := baseTab.
+		Foreground(lipgloss.Color("241"))
+
+	prsTab := inactiveTab.Render("Pull Requests")
+	branchesTab := inactiveTab.Render("Branches")
+
+	if m.currentView == prView {
+		prsTab = activeTab.Render("Pull Requests")
+	} else if m.currentView == branchesView {
+		branchesTab = activeTab.Render("Branches")
+	}
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, prsTab, branchesTab)
 }
 
 func (m AppModel) renderRepoPane() string {
@@ -480,7 +538,7 @@ func (m AppModel) renderBranchPane() string {
 		title = fmt.Sprintf("Branches [/%s]", m.branchFilterQuery)
 	}
 	if !showRepoPane {
-		title = fmt.Sprintf("%s (h: back)", title)
+		title = fmt.Sprintf("%s (esc: back)", title)
 	}
 
 	if m.activePane == branchPane {
@@ -490,6 +548,7 @@ func (m AppModel) renderBranchPane() string {
 	}
 
 	var items []string
+	items = append(items, m.renderRightTabs())
 	items = append(items, title)
 	items = append(items, "")
 
@@ -502,7 +561,7 @@ func (m AppModel) renderBranchPane() string {
 		if len(filtered) == 0 {
 			items = append(items, "No matches")
 		} else {
-			start, end := m.calculateWindow(m.branchCursor, len(filtered), availableHeight-2)
+			start, end := m.calculateWindow(m.branchCursor, len(filtered), availableHeight-3)
 
 			for i := start; i < end; i++ {
 				branch := filtered[i]
@@ -514,7 +573,7 @@ func (m AppModel) renderBranchPane() string {
 			}
 
 			if start > 0 {
-				items[1] = inactivePaneStyle.Render("  ↑ more")
+				items[2] = inactivePaneStyle.Render("  ↑ more")
 			}
 			if end < len(filtered) {
 				items = append(items, inactivePaneStyle.Render("  ↓ more"))
@@ -561,7 +620,7 @@ func (m AppModel) renderPRPane() string {
 		title = fmt.Sprintf("Pull Requests [/%s]", m.prFilterQuery)
 	}
 	if !showRepoPane {
-		title = fmt.Sprintf("%s (h: back)", title)
+		title = fmt.Sprintf("%s (esc: back)", title)
 	}
 
 	if m.activePane == branchPane {
@@ -571,6 +630,7 @@ func (m AppModel) renderPRPane() string {
 	}
 
 	var items []string
+	items = append(items, m.renderRightTabs())
 	items = append(items, title)
 	items = append(items, "")
 
@@ -583,7 +643,7 @@ func (m AppModel) renderPRPane() string {
 		if len(filtered) == 0 {
 			items = append(items, "No matches")
 		} else {
-			start, end := m.calculateWindow(m.prCursor, len(filtered), availableHeight-2)
+			start, end := m.calculateWindow(m.prCursor, len(filtered), availableHeight-3)
 
 			for i := start; i < end; i++ {
 				pr := filtered[i]
@@ -608,7 +668,7 @@ func (m AppModel) renderPRPane() string {
 			}
 
 			if start > 0 {
-				items[1] = inactivePaneStyle.Render("  ↑ more")
+				items[2] = inactivePaneStyle.Render("  ↑ more")
 			}
 			if end < len(filtered) {
 				items = append(items, inactivePaneStyle.Render("  ↓ more"))
