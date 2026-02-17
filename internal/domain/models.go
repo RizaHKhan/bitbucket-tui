@@ -40,10 +40,20 @@ type PullRequest struct {
 }
 
 type Pipeline struct {
+	UUID        string
 	BuildNumber int
 	State       string
 	Result      string
 	CreatedOn   string
+	StartedOn   string
+	CompletedOn string
+}
+
+type PipelineStep struct {
+	UUID        string
+	Name        string
+	State       string
+	Result      string
 	StartedOn   string
 	CompletedOn string
 }

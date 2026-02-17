@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -31,6 +32,8 @@ const (
 	branchesView
 	prView
 	pipelinesView
+	pipelineStepsView
+	pipelineStepLogView
 )
 
 var (
@@ -58,30 +61,38 @@ var (
 )
 
 type AppModel struct {
-	workspace           string
-	client              *bitbucket.Client
-	spinner             spinner.Model
-	activePane          pane
-	currentView         viewMode
-	repositories        []domain.Repository
-	branches            []domain.Branch
-	pullRequests        []domain.PullRequest
-	pipelines           []domain.Pipeline
-	repoCursor          int
-	branchCursor        int
-	prCursor            int
-	pipelineCursor      int
-	width               int
-	height              int
-	loading             bool
-	message             string
-	selectedRepo        string
-	selectedRepoSlug    string
-	filterMode          bool
-	repoFilterQuery     string
-	branchFilterQuery   string
-	prFilterQuery       string
-	pipelineFilterQuery string
+	workspace             string
+	client                *bitbucket.Client
+	spinner               spinner.Model
+	activePane            pane
+	currentView           viewMode
+	repositories          []domain.Repository
+	branches              []domain.Branch
+	pullRequests          []domain.PullRequest
+	pipelines             []domain.Pipeline
+	pipelineSteps         []domain.PipelineStep
+	pipelineStepLog       string
+	pipelineStepLogLines  []string
+	repoCursor            int
+	branchCursor          int
+	prCursor              int
+	pipelineCursor        int
+	pipelineStepCursor    int
+	pipelineStepLogCursor int
+	width                 int
+	height                int
+	loading               bool
+	message               string
+	selectedRepo          string
+	selectedRepoSlug      string
+	selectedPipelineRef   string
+	selectedPipelineUUID  string
+	selectedStepName      string
+	filterMode            bool
+	repoFilterQuery       string
+	branchFilterQuery     string
+	prFilterQuery         string
+	pipelineFilterQuery   string
 }
 
 type reposLoadedMsg struct {
@@ -102,6 +113,20 @@ type pullRequestsLoadedMsg struct {
 type pipelinesLoadedMsg struct {
 	pipelines []domain.Pipeline
 	err       error
+}
+
+type pipelineStepsLoadedMsg struct {
+	steps []domain.PipelineStep
+	err   error
+}
+
+type pipelineStepLogLoadedMsg struct {
+	log string
+	err error
+}
+
+type editorClosedMsg struct {
+	err error
 }
 
 func NewApp(workspace string, cfg config.Config) AppModel {
@@ -151,6 +176,20 @@ func loadPipelines(client *bitbucket.Client, repoSlug string) tea.Cmd {
 	}
 }
 
+func loadPipelineSteps(client *bitbucket.Client, repoSlug, pipelineUUID string) tea.Cmd {
+	return func() tea.Msg {
+		steps, err := client.ListPipelineSteps(repoSlug, pipelineUUID)
+		return pipelineStepsLoadedMsg{steps: steps, err: err}
+	}
+}
+
+func loadPipelineStepLog(client *bitbucket.Client, repoSlug, pipelineUUID, stepUUID string) tea.Cmd {
+	return func() tea.Msg {
+		log, err := client.GetPipelineStepLog(repoSlug, pipelineUUID, stepUUID)
+		return pipelineStepLogLoadedMsg{log: log, err: err}
+	}
+}
+
 func openURL(url string) tea.Cmd {
 	return func() tea.Msg {
 		var cmd *exec.Cmd
@@ -167,6 +206,46 @@ func openURL(url string) tea.Cmd {
 		_ = cmd.Start()
 		return nil
 	}
+}
+
+func openLogInEditor(logContent, stepName string) tea.Cmd {
+	content := logContent
+	if strings.TrimSpace(content) == "" {
+		content = "No log output returned for this step."
+	}
+
+	title := "pipeline-log"
+	if strings.TrimSpace(stepName) != "" {
+		title = strings.ReplaceAll(strings.TrimSpace(stepName), " ", "-")
+	}
+
+	tmpFile, err := os.CreateTemp("", fmt.Sprintf("bb-%s-*.log", title))
+	if err != nil {
+		return func() tea.Msg { return editorClosedMsg{err: err} }
+	}
+
+	filePath := tmpFile.Name()
+	if _, writeErr := tmpFile.WriteString(content); writeErr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(filePath)
+		return func() tea.Msg { return editorClosedMsg{err: writeErr} }
+	}
+	_ = tmpFile.Close()
+
+	var cmd *exec.Cmd
+	if _, lookErr := exec.LookPath("nvim"); lookErr == nil {
+		cmd = exec.Command("nvim", filePath)
+	} else if _, lookErr := exec.LookPath("less"); lookErr == nil {
+		cmd = exec.Command("less", filePath)
+	} else {
+		_ = os.Remove(filePath)
+		return func() tea.Msg { return editorClosedMsg{err: fmt.Errorf("neither nvim nor less is installed")} }
+	}
+
+	return tea.ExecProcess(cmd, func(execErr error) tea.Msg {
+		_ = os.Remove(filePath)
+		return editorClosedMsg{err: execErr}
+	})
 }
 
 func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -214,6 +293,38 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = ""
 		}
 
+	case pipelineStepsLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading pipeline steps: %v", msg.err)
+		} else {
+			m.pipelineSteps = msg.steps
+			m.pipelineStepCursor = 0
+			m.message = ""
+		}
+
+	case pipelineStepLogLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading pipeline log: %v", msg.err)
+		} else {
+			m.pipelineStepLog = msg.log
+			if strings.TrimSpace(msg.log) == "" {
+				m.pipelineStepLogLines = []string{"No log output returned for this step."}
+			} else {
+				m.pipelineStepLogLines = strings.Split(msg.log, "\n")
+			}
+			m.pipelineStepLogCursor = 0
+			m.message = ""
+		}
+
+	case editorClosedMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Editor error: %v", msg.err)
+		} else {
+			m.message = "Closed log viewer"
+		}
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -235,6 +346,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.currentView == pipelinesView {
 					currentFilter = &m.pipelineFilterQuery
 					currentCursor = &m.pipelineCursor
+				} else if m.currentView == pipelineStepsView || m.currentView == pipelineStepLogView {
+					return m, nil
 				}
 			}
 
@@ -267,12 +380,23 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
-			if m.activePane == branchPane {
+			if m.activePane == branchPane && m.currentView == pipelineStepLogView {
+				m.currentView = pipelineStepsView
+				m.pipelineStepLog = ""
+				m.pipelineStepLogLines = nil
+				m.pipelineStepLogCursor = 0
+			} else if m.activePane == branchPane && m.currentView == pipelineStepsView {
+				m.currentView = pipelinesView
+				m.pipelineStepCursor = 0
+				m.pipelineSteps = nil
+			} else if m.activePane == branchPane {
 				m.activePane = repoPane
 			}
 
 		case "/":
-			m.filterMode = true
+			if m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
+				m.filterMode = true
+			}
 
 		case "enter":
 			if !m.filterMode && m.activePane == repoPane && len(m.getFilteredRepos()) > 0 {
@@ -288,9 +412,41 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedRepoSlug = repo.Slug
 				return m, loadPullRequests(m.client, repo.Slug)
 			}
+			if !m.filterMode && m.activePane == branchPane && m.currentView == pipelinesView && len(m.getFilteredPipelines()) > 0 {
+				filtered := m.getFilteredPipelines()
+				selectedPipeline := filtered[m.pipelineCursor]
+				if selectedPipeline.UUID == "" {
+					m.message = "Selected pipeline has no UUID"
+					return m, nil
+				}
+				m.selectedPipelineRef = fmt.Sprintf("#%d", selectedPipeline.BuildNumber)
+				m.selectedPipelineUUID = selectedPipeline.UUID
+				m.currentView = pipelineStepsView
+				m.loading = true
+				m.pipelineSteps = nil
+				m.pipelineStepCursor = 0
+				return m, loadPipelineSteps(m.client, m.selectedRepoSlug, selectedPipeline.UUID)
+			}
+			if !m.filterMode && m.activePane == branchPane && m.currentView == pipelineStepsView && len(m.pipelineSteps) > 0 && m.selectedPipelineUUID != "" {
+				selectedStep := m.pipelineSteps[m.pipelineStepCursor]
+				if selectedStep.UUID == "" {
+					m.message = "Selected step has no UUID"
+					return m, nil
+				}
+				m.selectedStepName = selectedStep.Name
+				if m.selectedStepName == "" {
+					m.selectedStepName = selectedStep.UUID
+				}
+				m.currentView = pipelineStepLogView
+				m.loading = true
+				m.pipelineStepLog = ""
+				m.pipelineStepLogLines = nil
+				m.pipelineStepLogCursor = 0
+				return m, loadPipelineStepLog(m.client, m.selectedRepoSlug, m.selectedPipelineUUID, selectedStep.UUID)
+			}
 
 		case "h":
-			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" {
+			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
 				switch m.currentView {
 				case branchesView:
 					m.currentView = prView
@@ -319,7 +475,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			if !m.filterMode && m.activePane == repoPane && m.currentView != noSelection {
 				m.activePane = branchPane
-			} else if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" {
+			} else if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
 				switch m.currentView {
 				case prView:
 					m.currentView = branchesView
@@ -383,6 +539,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if m.pipelineCursor < len(filtered)-1 {
 							m.pipelineCursor++
 						}
+					} else if m.currentView == pipelineStepsView {
+						if m.pipelineStepCursor < len(m.pipelineSteps)-1 {
+							m.pipelineStepCursor++
+						}
+					} else if m.currentView == pipelineStepLogView {
+						if m.pipelineStepLogCursor < len(m.pipelineStepLogLines)-1 {
+							m.pipelineStepLogCursor++
+						}
 					}
 				}
 			}
@@ -405,6 +569,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if m.currentView == pipelinesView {
 						if m.pipelineCursor > 0 {
 							m.pipelineCursor--
+						}
+					} else if m.currentView == pipelineStepsView {
+						if m.pipelineStepCursor > 0 {
+							m.pipelineStepCursor--
+						}
+					} else if m.currentView == pipelineStepLogView {
+						if m.pipelineStepLogCursor > 0 {
+							m.pipelineStepLogCursor--
 						}
 					}
 				}
@@ -432,6 +604,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if selectedPR.URL != "" {
 					return m, openURL(selectedPR.URL)
 				}
+			}
+
+		case "v":
+			if !m.filterMode && m.activePane == branchPane && m.currentView == pipelineStepLogView && !m.loading {
+				return m, openLogInEditor(m.pipelineStepLog, m.selectedStepName)
 			}
 		}
 	}
@@ -473,6 +650,15 @@ func (m AppModel) View() string {
 	if m.currentView == prView && m.activePane == branchPane {
 		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  o: open in browser  /: filter  q: quit"
 	}
+	if m.currentView == pipelinesView && m.activePane == branchPane {
+		helpText = "h/l: switch tabs  enter: view steps  esc: back  j/k/↑/↓: navigate  /: filter  q: quit"
+	}
+	if m.currentView == pipelineStepsView && m.activePane == branchPane {
+		helpText = "enter: view logs  esc: back to pipelines  j/k/↑/↓: navigate  q: quit"
+	}
+	if m.currentView == pipelineStepLogView && m.activePane == branchPane {
+		helpText = "v: open in nvim/less  esc: back to steps  j/k/↑/↓: scroll logs  q: quit"
+	}
 	if m.filterMode {
 		currentFilter := m.repoFilterQuery
 		if m.activePane == branchPane {
@@ -507,6 +693,10 @@ func (m AppModel) renderRightPane() string {
 		return m.renderPRPane()
 	} else if m.currentView == pipelinesView {
 		return m.renderPipelinePane()
+	} else if m.currentView == pipelineStepsView {
+		return m.renderPipelineStepsPane()
+	} else if m.currentView == pipelineStepLogView {
+		return m.renderPipelineStepLogPane()
 	}
 	return ""
 }
@@ -530,7 +720,7 @@ func (m AppModel) renderRightTabs() string {
 		prsTab = activeTab.Render("Pull Requests")
 	} else if m.currentView == branchesView {
 		branchesTab = activeTab.Render("Branches")
-	} else if m.currentView == pipelinesView {
+	} else if m.currentView == pipelinesView || m.currentView == pipelineStepsView || m.currentView == pipelineStepLogView {
 		pipelinesTab = activeTab.Render("Pipelines")
 	}
 
@@ -858,6 +1048,169 @@ func (m AppModel) renderPipelinePane() string {
 			if end < len(filtered) {
 				items = append(items, inactivePaneStyle.Render("  ↓ more"))
 			}
+		}
+	}
+
+	content := strings.Join(items, "\n")
+	style := lipgloss.NewStyle().
+		Width(paneWidth).
+		Height(availableHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(0, 1)
+
+	return style.Render(content)
+}
+
+func (m AppModel) renderPipelineStepsPane() string {
+	showRepoPane := m.currentView == noSelection || m.activePane == repoPane
+
+	paneWidth := m.width - 4
+	if showRepoPane {
+		repoPaneWidth := (m.width - 10) / 3
+		if repoPaneWidth < 20 {
+			repoPaneWidth = 20
+		}
+		paneWidth = m.width - repoPaneWidth - 10
+	}
+	if paneWidth < 30 {
+		paneWidth = 30
+	}
+
+	availableHeight := m.height - 6
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+
+	title := "Pipeline Steps"
+	if m.selectedRepo != "" {
+		title = fmt.Sprintf("Pipeline Steps (%s)", m.selectedRepo)
+	}
+	if m.selectedPipelineRef != "" {
+		title = fmt.Sprintf("%s %s", title, m.selectedPipelineRef)
+	}
+	if !showRepoPane {
+		title = fmt.Sprintf("%s (esc: back)", title)
+	}
+
+	if m.activePane == branchPane {
+		title = activePaneStyle.Render(title)
+	} else {
+		title = inactivePaneStyle.Render(title)
+	}
+
+	var items []string
+	items = append(items, m.renderRightTabs())
+	items = append(items, title)
+	items = append(items, "")
+
+	if m.loading && m.currentView == pipelineStepsView {
+		items = append(items, m.spinner.View()+" Loading...")
+	} else if len(m.pipelineSteps) == 0 {
+		items = append(items, "No steps")
+	} else {
+		start, end := m.calculateWindow(m.pipelineStepCursor, len(m.pipelineSteps), availableHeight-3)
+		for i := start; i < end; i++ {
+			step := m.pipelineSteps[i]
+			cursor := " "
+			if m.activePane == branchPane && i == m.pipelineStepCursor {
+				cursor = cursorStyle.Render(">")
+			}
+
+			stateBadge := formatPipelineState(step.State)
+			resultBadge := formatPipelineResult(step.Result)
+			duration := pipelineDuration(step.StartedOn, step.CompletedOn)
+			line := fmt.Sprintf("%s %s %s %s", cursor, stateBadge, resultBadge, step.Name)
+			if duration != "" {
+				line = fmt.Sprintf("%s (%s)", line, duration)
+			}
+			items = append(items, line)
+		}
+
+		if start > 0 {
+			items[2] = inactivePaneStyle.Render("  ↑ more")
+		}
+		if end < len(m.pipelineSteps) {
+			items = append(items, inactivePaneStyle.Render("  ↓ more"))
+		}
+	}
+
+	content := strings.Join(items, "\n")
+	style := lipgloss.NewStyle().
+		Width(paneWidth).
+		Height(availableHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(0, 1)
+
+	return style.Render(content)
+}
+
+func (m AppModel) renderPipelineStepLogPane() string {
+	showRepoPane := m.currentView == noSelection || m.activePane == repoPane
+
+	paneWidth := m.width - 4
+	if showRepoPane {
+		repoPaneWidth := (m.width - 10) / 3
+		if repoPaneWidth < 20 {
+			repoPaneWidth = 20
+		}
+		paneWidth = m.width - repoPaneWidth - 10
+	}
+	if paneWidth < 30 {
+		paneWidth = 30
+	}
+
+	availableHeight := m.height - 6
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+
+	title := "Pipeline Logs"
+	if m.selectedRepo != "" {
+		title = fmt.Sprintf("Pipeline Logs (%s)", m.selectedRepo)
+	}
+	if m.selectedPipelineRef != "" {
+		title = fmt.Sprintf("%s %s", title, m.selectedPipelineRef)
+	}
+	if m.selectedStepName != "" {
+		title = fmt.Sprintf("%s - %s", title, m.selectedStepName)
+	}
+	if !showRepoPane {
+		title = fmt.Sprintf("%s (esc: back)", title)
+	}
+
+	if m.activePane == branchPane {
+		title = activePaneStyle.Render(title)
+	} else {
+		title = inactivePaneStyle.Render(title)
+	}
+
+	var items []string
+	items = append(items, m.renderRightTabs())
+	items = append(items, title)
+	items = append(items, "")
+
+	if m.loading && m.currentView == pipelineStepLogView {
+		items = append(items, m.spinner.View()+" Loading...")
+	} else if len(m.pipelineStepLogLines) == 0 {
+		items = append(items, "No logs")
+	} else {
+		start, end := m.calculateWindow(m.pipelineStepLogCursor, len(m.pipelineStepLogLines), availableHeight-3)
+		for i := start; i < end; i++ {
+			line := m.pipelineStepLogLines[i]
+			cursor := " "
+			if m.activePane == branchPane && i == m.pipelineStepLogCursor {
+				cursor = cursorStyle.Render(">")
+			}
+			items = append(items, fmt.Sprintf("%s %s", cursor, line))
+		}
+
+		if start > 0 {
+			items[2] = inactivePaneStyle.Render("  ↑ more")
+		}
+		if end < len(m.pipelineStepLogLines) {
+			items = append(items, inactivePaneStyle.Render("  ↓ more"))
 		}
 	}
 

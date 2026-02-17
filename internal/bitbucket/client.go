@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"sort"
 
 	"bitbucket-cli/internal/config"
@@ -98,6 +99,7 @@ type pipelinesResponse struct {
 }
 
 type apiPipeline struct {
+	UUID        string `json:"uuid"`
 	BuildNumber int    `json:"build_number"`
 	CreatedOn   string `json:"created_on"`
 	CompletedOn string `json:"completed_on"`
@@ -107,6 +109,23 @@ type apiPipeline struct {
 			Name      string `json:"name"`
 			StartedOn string `json:"started_on"`
 		} `json:"stage"`
+		Result struct {
+			Name string `json:"name"`
+		} `json:"result"`
+	} `json:"state"`
+}
+
+type pipelineStepsResponse struct {
+	Values []apiPipelineStep `json:"values"`
+}
+
+type apiPipelineStep struct {
+	UUID        string `json:"uuid"`
+	Name        string `json:"name"`
+	StartedOn   string `json:"started_on"`
+	CompletedOn string `json:"completed_on"`
+	State       struct {
+		Name   string `json:"name"`
 		Result struct {
 			Name string `json:"name"`
 		} `json:"result"`
@@ -346,6 +365,7 @@ func (c *Client) ListPipelines(repoSlug string) ([]domain.Pipeline, error) {
 	pipelines := make([]domain.Pipeline, 0, len(decoded.Values))
 	for _, item := range decoded.Values {
 		pipelines = append(pipelines, domain.Pipeline{
+			UUID:        item.UUID,
 			BuildNumber: item.BuildNumber,
 			State:       item.State.Name,
 			Result:      item.State.Result.Name,
@@ -356,6 +376,83 @@ func (c *Client) ListPipelines(repoSlug string) ([]domain.Pipeline, error) {
 	}
 
 	return pipelines, nil
+}
+
+func (c *Client) ListPipelineSteps(repoSlug, pipelineUUID string) ([]domain.PipelineStep, error) {
+	escapedUUID := neturl.PathEscape(pipelineUUID)
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pipelines/%s/steps", c.config.Workspace, repoSlug, escapedUUID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	setJSONHeaders(req, c.config.BasicAuth)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	var decoded pipelineStepsResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return nil, fmt.Errorf("unable to decode pipeline steps response: %w", err)
+	}
+
+	steps := make([]domain.PipelineStep, 0, len(decoded.Values))
+	for _, item := range decoded.Values {
+		steps = append(steps, domain.PipelineStep{
+			UUID:        item.UUID,
+			Name:        item.Name,
+			State:       item.State.Name,
+			Result:      item.State.Result.Name,
+			StartedOn:   item.StartedOn,
+			CompletedOn: item.CompletedOn,
+		})
+	}
+
+	return steps, nil
+}
+
+func (c *Client) GetPipelineStepLog(repoSlug, pipelineUUID, stepUUID string) (string, error) {
+	escapedPipelineUUID := neturl.PathEscape(pipelineUUID)
+	escapedStepUUID := neturl.PathEscape(stepUUID)
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pipelines/%s/steps/%s/log", c.config.Workspace, repoSlug, escapedPipelineUUID, escapedStepUUID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", c.config.BasicAuth)
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	return string(body), nil
 }
 
 func sortByUpdatedOn(repos []domain.Repository) {
