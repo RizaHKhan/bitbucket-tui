@@ -10,6 +10,7 @@ import (
 	"bitbucket-cli/internal/config"
 	"bitbucket-cli/internal/domain"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -57,6 +58,7 @@ var (
 type AppModel struct {
 	workspace         string
 	client            *bitbucket.Client
+	spinner           spinner.Model
 	activePane        pane
 	currentView       viewMode
 	repositories      []domain.Repository
@@ -93,9 +95,14 @@ type pullRequestsLoadedMsg struct {
 }
 
 func NewApp(workspace string, cfg config.Config) AppModel {
+	s := spinner.New()
+	s.Spinner = spinner.MiniDot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+
 	return AppModel{
 		workspace:   workspace,
 		client:      bitbucket.NewClient(cfg),
+		spinner:     s,
 		activePane:  repoPane,
 		currentView: noSelection,
 		loading:     true,
@@ -103,7 +110,7 @@ func NewApp(workspace string, cfg config.Config) AppModel {
 }
 
 func (m AppModel) Init() tea.Cmd {
-	return loadRepositories(m.client)
+	return tea.Batch(loadRepositories(m.client), m.spinner.Tick)
 }
 
 func loadRepositories(client *bitbucket.Client) tea.Cmd {
@@ -179,6 +186,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prCursor = 0
 			m.message = ""
 		}
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		m.message = ""
@@ -471,7 +483,7 @@ func (m AppModel) renderRepoPane() string {
 	items = append(items, "")
 
 	if m.loading && len(m.repositories) == 0 {
-		items = append(items, "Loading...")
+		items = append(items, m.spinner.View()+" Loading...")
 	} else if len(m.repositories) == 0 {
 		items = append(items, "No repositories")
 	} else {
@@ -553,7 +565,7 @@ func (m AppModel) renderBranchPane() string {
 	items = append(items, "")
 
 	if m.loading && m.activePane == branchPane {
-		items = append(items, "Loading...")
+		items = append(items, m.spinner.View()+" Loading...")
 	} else if len(m.branches) == 0 {
 		items = append(items, "← Select a repo")
 	} else {
@@ -635,7 +647,7 @@ func (m AppModel) renderPRPane() string {
 	items = append(items, "")
 
 	if m.loading && m.activePane == branchPane && m.currentView == prView {
-		items = append(items, "Loading...")
+		items = append(items, m.spinner.View()+" Loading...")
 	} else if len(m.pullRequests) == 0 {
 		items = append(items, "No pull requests")
 	} else {

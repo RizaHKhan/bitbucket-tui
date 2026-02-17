@@ -42,3 +42,39 @@ chmod 600 ~/.config/bitbucket-cli/config
 ```
 
 If no `[default]` is set, you'll need to select a workspace when the application starts.
+
+## Adding a Go package dependency
+
+This project uses Go modules (`go.mod` / `go.sum`).
+
+1. Import the package in your Go file.
+
+```go
+import "github.com/charmbracelet/bubbles/spinner"
+```
+
+2. Add the dependency from the repo root:
+
+```bash
+go get github.com/charmbracelet/bubbles/spinner
+```
+
+3. Sync module files:
+
+```bash
+go mod tidy
+```
+
+4. Verify everything builds/tests:
+
+```bash
+go test ./...
+```
+
+### Useful variants
+
+- Install latest: `go get github.com/google/uuid`
+- Pin version: `go get github.com/google/uuid@v1.6.0`
+- Remove dependency: `go get github.com/google/uuid@none && go mod tidy`
+
+Always commit both `go.mod` and `go.sum` when dependencies change.
