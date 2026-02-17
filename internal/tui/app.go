@@ -324,20 +324,27 @@ func (m AppModel) View() string {
 		return "Loading..."
 	}
 
-	leftPane := m.renderRepoPane()
+	showRepoPane := m.currentView == noSelection || m.activePane == repoPane
 
-	var rightPane string
-	if m.currentView == noSelection {
-		rightPane = ""
+	var content string
+	if showRepoPane {
+		leftPane := m.renderRepoPane()
+
+		var rightPane string
+		if m.currentView == noSelection {
+			rightPane = ""
+		} else {
+			rightPane = m.renderRightPane()
+		}
+
+		content = lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			leftPane,
+			rightPane,
+		)
 	} else {
-		rightPane = m.renderRightPane()
+		content = m.renderRightPane()
 	}
-
-	content := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		leftPane,
-		rightPane,
-	)
 
 	helpText := "j/k/↑/↓: navigate  b: branches  p: pull requests  /: filter  q: quit"
 	if m.currentView != noSelection {
@@ -446,11 +453,16 @@ func (m AppModel) renderRepoPane() string {
 }
 
 func (m AppModel) renderBranchPane() string {
-	repoPaneWidth := (m.width - 10) / 3
-	if repoPaneWidth < 20 {
-		repoPaneWidth = 20
+	showRepoPane := m.currentView == noSelection || m.activePane == repoPane
+
+	paneWidth := m.width - 4
+	if showRepoPane {
+		repoPaneWidth := (m.width - 10) / 3
+		if repoPaneWidth < 20 {
+			repoPaneWidth = 20
+		}
+		paneWidth = m.width - repoPaneWidth - 10
 	}
-	paneWidth := m.width - repoPaneWidth - 10
 	if paneWidth < 30 {
 		paneWidth = 30
 	}
@@ -466,6 +478,9 @@ func (m AppModel) renderBranchPane() string {
 	}
 	if m.branchFilterQuery != "" {
 		title = fmt.Sprintf("Branches [/%s]", m.branchFilterQuery)
+	}
+	if !showRepoPane {
+		title = fmt.Sprintf("%s (h: back)", title)
 	}
 
 	if m.activePane == branchPane {
@@ -519,11 +534,16 @@ func (m AppModel) renderBranchPane() string {
 }
 
 func (m AppModel) renderPRPane() string {
-	repoPaneWidth := (m.width - 10) / 3
-	if repoPaneWidth < 20 {
-		repoPaneWidth = 20
+	showRepoPane := m.currentView == noSelection || m.activePane == repoPane
+
+	paneWidth := m.width - 4
+	if showRepoPane {
+		repoPaneWidth := (m.width - 10) / 3
+		if repoPaneWidth < 20 {
+			repoPaneWidth = 20
+		}
+		paneWidth = m.width - repoPaneWidth - 10
 	}
-	paneWidth := m.width - repoPaneWidth - 10
 	if paneWidth < 30 {
 		paneWidth = 30
 	}
@@ -539,6 +559,9 @@ func (m AppModel) renderPRPane() string {
 	}
 	if m.prFilterQuery != "" {
 		title = fmt.Sprintf("Pull Requests [/%s]", m.prFilterQuery)
+	}
+	if !showRepoPane {
+		title = fmt.Sprintf("%s (h: back)", title)
 	}
 
 	if m.activePane == branchPane {
@@ -605,7 +628,7 @@ func (m AppModel) renderPRPane() string {
 }
 
 func formatPRState(state string, draft bool) string {
-	switch strings.ToLower(state) {
+	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "open":
 		if draft {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[DRAFT]")

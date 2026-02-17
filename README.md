@@ -14,6 +14,7 @@ In order to do this, we need to add credentials for each workspace (there are ot
 
 ### Configuration
 
+# TODO: This should be ~/.config/bitbucket-tui/
 Workspaces are configured in `~/.config/bitbucket-cli/config` using INI format (similar to AWS CLI):
 
 ```ini

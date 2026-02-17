@@ -277,6 +277,7 @@ func (c *Client) ListPullRequests(repoSlug string) ([]domain.PullRequest, error)
 				Title:        item.Title,
 				Description:  item.Description,
 				State:        item.State,
+				Draft:        item.Draft,
 				Author:       item.Author.DisplayName,
 				SourceBranch: item.Source.Branch.Name,
 				DestBranch:   item.Destination.Branch.Name,
