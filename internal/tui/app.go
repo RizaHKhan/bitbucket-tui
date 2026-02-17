@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"bitbucket-cli/internal/bitbucket"
 	"bitbucket-cli/internal/config"
@@ -29,6 +30,7 @@ const (
 	noSelection viewMode = iota
 	branchesView
 	prView
+	pipelinesView
 )
 
 var (
@@ -56,27 +58,30 @@ var (
 )
 
 type AppModel struct {
-	workspace         string
-	client            *bitbucket.Client
-	spinner           spinner.Model
-	activePane        pane
-	currentView       viewMode
-	repositories      []domain.Repository
-	branches          []domain.Branch
-	pullRequests      []domain.PullRequest
-	repoCursor        int
-	branchCursor      int
-	prCursor          int
-	width             int
-	height            int
-	loading           bool
-	message           string
-	selectedRepo      string
-	selectedRepoSlug  string
-	filterMode        bool
-	repoFilterQuery   string
-	branchFilterQuery string
-	prFilterQuery     string
+	workspace           string
+	client              *bitbucket.Client
+	spinner             spinner.Model
+	activePane          pane
+	currentView         viewMode
+	repositories        []domain.Repository
+	branches            []domain.Branch
+	pullRequests        []domain.PullRequest
+	pipelines           []domain.Pipeline
+	repoCursor          int
+	branchCursor        int
+	prCursor            int
+	pipelineCursor      int
+	width               int
+	height              int
+	loading             bool
+	message             string
+	selectedRepo        string
+	selectedRepoSlug    string
+	filterMode          bool
+	repoFilterQuery     string
+	branchFilterQuery   string
+	prFilterQuery       string
+	pipelineFilterQuery string
 }
 
 type reposLoadedMsg struct {
@@ -92,6 +97,11 @@ type branchesLoadedMsg struct {
 type pullRequestsLoadedMsg struct {
 	prs []domain.PullRequest
 	err error
+}
+
+type pipelinesLoadedMsg struct {
+	pipelines []domain.Pipeline
+	err       error
 }
 
 func NewApp(workspace string, cfg config.Config) AppModel {
@@ -131,6 +141,13 @@ func loadPullRequests(client *bitbucket.Client, repoSlug string) tea.Cmd {
 	return func() tea.Msg {
 		prs, err := client.ListPullRequests(repoSlug)
 		return pullRequestsLoadedMsg{prs: prs, err: err}
+	}
+}
+
+func loadPipelines(client *bitbucket.Client, repoSlug string) tea.Cmd {
+	return func() tea.Msg {
+		pipelines, err := client.ListPipelines(repoSlug)
+		return pipelinesLoadedMsg{pipelines: pipelines, err: err}
 	}
 }
 
@@ -187,6 +204,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = ""
 		}
 
+	case pipelinesLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading pipelines: %v", msg.err)
+		} else {
+			m.pipelines = msg.pipelines
+			m.pipelineCursor = 0
+			m.message = ""
+		}
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -205,6 +232,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.currentView == prView {
 					currentFilter = &m.prFilterQuery
 					currentCursor = &m.prCursor
+				} else if m.currentView == pipelinesView {
+					currentFilter = &m.pipelineFilterQuery
+					currentCursor = &m.pipelineCursor
 				}
 			}
 
@@ -260,25 +290,59 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "h":
-			if !m.filterMode && m.activePane == branchPane && m.currentView == branchesView && m.selectedRepoSlug != "" {
-				m.currentView = prView
-				m.loading = true
-				m.pullRequests = nil
-				m.prFilterQuery = ""
-				m.prCursor = 0
-				return m, loadPullRequests(m.client, m.selectedRepoSlug)
+			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" {
+				switch m.currentView {
+				case branchesView:
+					m.currentView = prView
+					m.loading = true
+					m.pullRequests = nil
+					m.prFilterQuery = ""
+					m.prCursor = 0
+					return m, loadPullRequests(m.client, m.selectedRepoSlug)
+				case prView:
+					m.currentView = pipelinesView
+					m.loading = true
+					m.pipelines = nil
+					m.pipelineFilterQuery = ""
+					m.pipelineCursor = 0
+					return m, loadPipelines(m.client, m.selectedRepoSlug)
+				case pipelinesView:
+					m.currentView = branchesView
+					m.loading = true
+					m.branches = nil
+					m.branchFilterQuery = ""
+					m.branchCursor = 0
+					return m, loadBranches(m.client, m.selectedRepoSlug)
+				}
 			}
 
 		case "l":
 			if !m.filterMode && m.activePane == repoPane && m.currentView != noSelection {
 				m.activePane = branchPane
-			} else if !m.filterMode && m.activePane == branchPane && m.currentView == prView && m.selectedRepoSlug != "" {
-				m.currentView = branchesView
-				m.loading = true
-				m.branches = nil
-				m.branchFilterQuery = ""
-				m.branchCursor = 0
-				return m, loadBranches(m.client, m.selectedRepoSlug)
+			} else if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" {
+				switch m.currentView {
+				case prView:
+					m.currentView = branchesView
+					m.loading = true
+					m.branches = nil
+					m.branchFilterQuery = ""
+					m.branchCursor = 0
+					return m, loadBranches(m.client, m.selectedRepoSlug)
+				case branchesView:
+					m.currentView = pipelinesView
+					m.loading = true
+					m.pipelines = nil
+					m.pipelineFilterQuery = ""
+					m.pipelineCursor = 0
+					return m, loadPipelines(m.client, m.selectedRepoSlug)
+				case pipelinesView:
+					m.currentView = prView
+					m.loading = true
+					m.pullRequests = nil
+					m.prFilterQuery = ""
+					m.prCursor = 0
+					return m, loadPullRequests(m.client, m.selectedRepoSlug)
+				}
 			}
 
 		case "b":
@@ -314,6 +378,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if m.prCursor < len(filtered)-1 {
 							m.prCursor++
 						}
+					} else if m.currentView == pipelinesView {
+						filtered := m.getFilteredPipelines()
+						if m.pipelineCursor < len(filtered)-1 {
+							m.pipelineCursor++
+						}
 					}
 				}
 			}
@@ -332,6 +401,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if m.currentView == prView {
 						if m.prCursor > 0 {
 							m.prCursor--
+						}
+					} else if m.currentView == pipelinesView {
+						if m.pipelineCursor > 0 {
+							m.pipelineCursor--
 						}
 					}
 				}
@@ -407,6 +480,8 @@ func (m AppModel) View() string {
 				currentFilter = m.branchFilterQuery
 			} else if m.currentView == prView {
 				currentFilter = m.prFilterQuery
+			} else if m.currentView == pipelinesView {
+				currentFilter = m.pipelineFilterQuery
 			}
 		}
 		helpText = fmt.Sprintf("Filter: %s  (esc: cancel, enter: apply)", currentFilter)
@@ -430,6 +505,8 @@ func (m AppModel) renderRightPane() string {
 		return m.renderBranchPane()
 	} else if m.currentView == prView {
 		return m.renderPRPane()
+	} else if m.currentView == pipelinesView {
+		return m.renderPipelinePane()
 	}
 	return ""
 }
@@ -447,14 +524,17 @@ func (m AppModel) renderRightTabs() string {
 
 	prsTab := inactiveTab.Render("Pull Requests")
 	branchesTab := inactiveTab.Render("Branches")
+	pipelinesTab := inactiveTab.Render("Pipelines")
 
 	if m.currentView == prView {
 		prsTab = activeTab.Render("Pull Requests")
 	} else if m.currentView == branchesView {
 		branchesTab = activeTab.Render("Branches")
+	} else if m.currentView == pipelinesView {
+		pipelinesTab = activeTab.Render("Pipelines")
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, prsTab, branchesTab)
+	return lipgloss.JoinHorizontal(lipgloss.Top, prsTab, branchesTab, pipelinesTab)
 }
 
 func (m AppModel) renderRepoPane() string {
@@ -699,6 +779,99 @@ func (m AppModel) renderPRPane() string {
 	return style.Render(content)
 }
 
+func (m AppModel) renderPipelinePane() string {
+	showRepoPane := m.currentView == noSelection || m.activePane == repoPane
+
+	paneWidth := m.width - 4
+	if showRepoPane {
+		repoPaneWidth := (m.width - 10) / 3
+		if repoPaneWidth < 20 {
+			repoPaneWidth = 20
+		}
+		paneWidth = m.width - repoPaneWidth - 10
+	}
+	if paneWidth < 30 {
+		paneWidth = 30
+	}
+
+	availableHeight := m.height - 6
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+
+	title := "Pipelines"
+	if m.selectedRepo != "" {
+		title = fmt.Sprintf("Pipelines (%s)", m.selectedRepo)
+	}
+	if m.pipelineFilterQuery != "" {
+		title = fmt.Sprintf("Pipelines [/%s]", m.pipelineFilterQuery)
+	}
+	if !showRepoPane {
+		title = fmt.Sprintf("%s (esc: back)", title)
+	}
+
+	if m.activePane == branchPane {
+		title = activePaneStyle.Render(title)
+	} else {
+		title = inactivePaneStyle.Render(title)
+	}
+
+	var items []string
+	items = append(items, m.renderRightTabs())
+	items = append(items, title)
+	items = append(items, "")
+
+	if m.loading && m.activePane == branchPane && m.currentView == pipelinesView {
+		items = append(items, m.spinner.View()+" Loading...")
+	} else if len(m.pipelines) == 0 {
+		items = append(items, "No pipelines")
+	} else {
+		filtered := m.getFilteredPipelines()
+		if len(filtered) == 0 {
+			items = append(items, "No matches")
+		} else {
+			start, end := m.calculateWindow(m.pipelineCursor, len(filtered), availableHeight-3)
+
+			for i := start; i < end; i++ {
+				pipeline := filtered[i]
+				cursor := " "
+				if m.activePane == branchPane && i == m.pipelineCursor {
+					cursor = cursorStyle.Render(">")
+				}
+
+				stateBadge := formatPipelineState(pipeline.State)
+				resultBadge := formatPipelineResult(pipeline.Result)
+				created := shortTimestamp(pipeline.CreatedOn)
+				duration := pipelineDuration(pipeline.StartedOn, pipeline.CompletedOn)
+
+				line := fmt.Sprintf("%s #%d %s %s created:%s", cursor, pipeline.BuildNumber, stateBadge, resultBadge, created)
+				if duration != "" {
+					line = fmt.Sprintf("%s duration:%s", line, duration)
+				}
+
+				items = append(items, line)
+			}
+
+			if start > 0 {
+				items[2] = inactivePaneStyle.Render("  ↑ more")
+			}
+			if end < len(filtered) {
+				items = append(items, inactivePaneStyle.Render("  ↓ more"))
+			}
+		}
+	}
+
+	content := strings.Join(items, "\n")
+	style := lipgloss.NewStyle().
+		Width(paneWidth).
+		Height(availableHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(0, 1)
+
+	return style.Render(content)
+}
+
 func formatPRState(state string, draft bool) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "open":
@@ -715,6 +888,85 @@ func formatPRState(state string, draft bool) string {
 	default:
 		return fmt.Sprintf("[%s]", strings.ToUpper(state))
 	}
+}
+
+func formatPipelineState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "completed":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Render("[COMPLETED]")
+	case "in_progress":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("[RUNNING]")
+	case "pending":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("[PENDING]")
+	case "paused":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("[PAUSED]")
+	case "error":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("[ERROR]")
+	default:
+		return fmt.Sprintf("[%s]", strings.ToUpper(state))
+	}
+}
+
+func formatPipelineResult(result string) string {
+	switch strings.ToLower(strings.TrimSpace(result)) {
+	case "successful", "success":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("[SUCCESS]")
+	case "failed", "error":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("[FAILED]")
+	case "stopped":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("[STOPPED]")
+	case "expired":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[EXPIRED]")
+	case "":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[N/A]")
+	default:
+		return fmt.Sprintf("[%s]", strings.ToUpper(result))
+	}
+}
+
+func shortTimestamp(value string) string {
+	if value == "" {
+		return "-"
+	}
+
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return value
+	}
+
+	return t.Local().Format("2006-01-02 15:04")
+}
+
+func pipelineDuration(startedOn, completedOn string) string {
+	if startedOn == "" {
+		return ""
+	}
+
+	start, err := time.Parse(time.RFC3339, startedOn)
+	if err != nil {
+		return ""
+	}
+
+	end := time.Now().UTC()
+	if completedOn != "" {
+		parsedEnd, parseErr := time.Parse(time.RFC3339, completedOn)
+		if parseErr == nil {
+			end = parsedEnd
+		}
+	}
+
+	if end.Before(start) {
+		return ""
+	}
+
+	duration := end.Sub(start)
+	if duration < time.Minute {
+		return fmt.Sprintf("%ds", int(duration.Seconds()))
+	}
+	if duration < time.Hour {
+		return fmt.Sprintf("%dm", int(duration.Minutes()))
+	}
+	return fmt.Sprintf("%dh%dm", int(duration.Hours()), int(duration.Minutes())%60)
 }
 
 func (m AppModel) getFilteredRepos() []domain.Repository {
@@ -760,6 +1012,24 @@ func (m AppModel) getFilteredPRs() []domain.PullRequest {
 			strings.Contains(strings.ToLower(pr.Author), query) ||
 			strings.Contains(strings.ToLower(pr.SourceBranch), query) {
 			filtered = append(filtered, pr)
+		}
+	}
+	return filtered
+}
+
+func (m AppModel) getFilteredPipelines() []domain.Pipeline {
+	if m.pipelineFilterQuery == "" {
+		return m.pipelines
+	}
+
+	var filtered []domain.Pipeline
+	query := strings.ToLower(m.pipelineFilterQuery)
+	for _, pipeline := range m.pipelines {
+		buildNumber := fmt.Sprintf("%d", pipeline.BuildNumber)
+		if strings.Contains(strings.ToLower(pipeline.State), query) ||
+			strings.Contains(strings.ToLower(pipeline.Result), query) ||
+			strings.Contains(strings.ToLower(buildNumber), query) {
+			filtered = append(filtered, pipeline)
 		}
 	}
 	return filtered

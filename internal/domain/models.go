@@ -38,3 +38,12 @@ type PullRequest struct {
 	UpdatedOn    string
 	URL          string
 }
+
+type Pipeline struct {
+	BuildNumber int
+	State       string
+	Result      string
+	CreatedOn   string
+	StartedOn   string
+	CompletedOn string
+}

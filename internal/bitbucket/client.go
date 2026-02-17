@@ -92,6 +92,27 @@ type apiPullRequest struct {
 	} `json:"links"`
 }
 
+type pipelinesResponse struct {
+	Values []apiPipeline `json:"values"`
+	Next   string        `json:"next"`
+}
+
+type apiPipeline struct {
+	BuildNumber int    `json:"build_number"`
+	CreatedOn   string `json:"created_on"`
+	CompletedOn string `json:"completed_on"`
+	State       struct {
+		Name  string `json:"name"`
+		Stage struct {
+			Name      string `json:"name"`
+			StartedOn string `json:"started_on"`
+		} `json:"stage"`
+		Result struct {
+			Name string `json:"name"`
+		} `json:"result"`
+	} `json:"state"`
+}
+
 func NewClient(cfg config.Config) *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: cfg.Timeout},
@@ -291,6 +312,50 @@ func (c *Client) ListPullRequests(repoSlug string) ([]domain.PullRequest, error)
 	}
 
 	return allPRs, nil
+}
+
+func (c *Client) ListPipelines(repoSlug string) ([]domain.Pipeline, error) {
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pipelines?sort=-created_on&pagelen=30", c.config.Workspace, repoSlug)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	setJSONHeaders(req, c.config.BasicAuth)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	var decoded pipelinesResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return nil, fmt.Errorf("unable to decode pipelines response: %w", err)
+	}
+
+	pipelines := make([]domain.Pipeline, 0, len(decoded.Values))
+	for _, item := range decoded.Values {
+		pipelines = append(pipelines, domain.Pipeline{
+			BuildNumber: item.BuildNumber,
+			State:       item.State.Name,
+			Result:      item.State.Result.Name,
+			CreatedOn:   item.CreatedOn,
+			StartedOn:   item.State.Stage.StartedOn,
+			CompletedOn: item.CompletedOn,
+		})
+	}
+
+	return pipelines, nil
 }
 
 func sortByUpdatedOn(repos []domain.Repository) {
