@@ -66,6 +66,16 @@ type pullRequestsResponse struct {
 	Next   string           `json:"next"`
 }
 
+type commitsResponse struct {
+	Values []apiCommit `json:"values"`
+	Next   string      `json:"next"`
+}
+
+type diffstatResponse struct {
+	Values []apiDiffstat `json:"values"`
+	Next   string        `json:"next"`
+}
+
 type apiPullRequest struct {
 	ID          int    `json:"id"`
 	Title       string `json:"title"`
@@ -95,6 +105,30 @@ type apiPullRequest struct {
 			Href string `json:"href"`
 		} `json:"html"`
 	} `json:"links"`
+}
+
+type apiCommit struct {
+	Hash    string `json:"hash"`
+	Message string `json:"message"`
+	Date    string `json:"date"`
+	Author  struct {
+		Raw  string `json:"raw"`
+		User struct {
+			DisplayName string `json:"display_name"`
+		} `json:"user"`
+	} `json:"author"`
+}
+
+type apiDiffstat struct {
+	Status       string `json:"status"`
+	LinesAdded   int    `json:"lines_added"`
+	LinesRemoved int    `json:"lines_removed"`
+	Old          struct {
+		Path string `json:"path"`
+	} `json:"old"`
+	New struct {
+		Path string `json:"path"`
+	} `json:"new"`
 }
 
 type pipelinesResponse struct {
@@ -380,6 +414,141 @@ func (c *Client) ListPipelines(repoSlug string) ([]domain.Pipeline, error) {
 	}
 
 	return pipelines, nil
+}
+
+func (c *Client) ListPullRequestCommits(repoSlug string, pullRequestID int) ([]domain.Commit, error) {
+	var allCommits []domain.Commit
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests/%d/commits?pagelen=50", c.config.Workspace, repoSlug, pullRequestID)
+
+	for url != "" {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		setJSONHeaders(req, c.config.BasicAuth)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+		}
+
+		var decoded commitsResponse
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			return nil, fmt.Errorf("unable to decode pull request commits response: %w", err)
+		}
+
+		for _, item := range decoded.Values {
+			author := strings.TrimSpace(item.Author.User.DisplayName)
+			if author == "" {
+				author = strings.TrimSpace(item.Author.Raw)
+			}
+
+			allCommits = append(allCommits, domain.Commit{
+				Hash:    item.Hash,
+				Message: item.Message,
+				Author:  author,
+				Date:    item.Date,
+			})
+		}
+
+		url = decoded.Next
+	}
+
+	return allCommits, nil
+}
+
+func (c *Client) ListCommitChanges(repoSlug, commitHash string) ([]domain.CommitChange, error) {
+	var allChanges []domain.CommitChange
+	escapedHash := neturl.PathEscape(commitHash)
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/diffstat/%s?pagelen=100", c.config.Workspace, repoSlug, escapedHash)
+
+	for url != "" {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		setJSONHeaders(req, c.config.BasicAuth)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+		}
+
+		var decoded diffstatResponse
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			return nil, fmt.Errorf("unable to decode diffstat response: %w", err)
+		}
+
+		for _, item := range decoded.Values {
+			path := strings.TrimSpace(item.New.Path)
+			if path == "" {
+				path = strings.TrimSpace(item.Old.Path)
+			}
+
+			allChanges = append(allChanges, domain.CommitChange{
+				Path:         path,
+				Status:       item.Status,
+				LinesAdded:   item.LinesAdded,
+				LinesRemoved: item.LinesRemoved,
+			})
+		}
+
+		url = decoded.Next
+	}
+
+	return allChanges, nil
+}
+
+func (c *Client) GetCommitDiff(repoSlug, commitHash string) (string, error) {
+	escapedHash := neturl.PathEscape(commitHash)
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/diff/%s", c.config.Workspace, repoSlug, escapedHash)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", c.config.BasicAuth)
+	req.Header.Set("Accept", "text/plain")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	return string(body), nil
 }
 
 func (c *Client) GetPipeline(repoSlug, pipelineUUID string) (domain.Pipeline, error) {

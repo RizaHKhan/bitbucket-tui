@@ -39,6 +39,20 @@ type PullRequest struct {
 	URL          string
 }
 
+type Commit struct {
+	Hash    string
+	Message string
+	Author  string
+	Date    string
+}
+
+type CommitChange struct {
+	Path         string
+	Status       string
+	LinesAdded   int
+	LinesRemoved int
+}
+
 type Pipeline struct {
 	UUID        string
 	BuildNumber int

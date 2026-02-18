@@ -32,6 +32,7 @@ const (
 	noSelection viewMode = iota
 	branchesView
 	prView
+	prCommitsView
 	pipelinesView
 	pipelineStepsView
 	pipelineStepLogView
@@ -70,6 +71,11 @@ type AppModel struct {
 	repositories          []domain.Repository
 	branches              []domain.Branch
 	pullRequests          []domain.PullRequest
+	prCommits             []domain.Commit
+	prCommitChanges       []domain.CommitChange
+	prCommitDiff          string
+	prCommitChangesCache  map[string][]domain.CommitChange
+	prCommitDiffCache     map[string]string
 	pipelines             []domain.Pipeline
 	pipelineSteps         []domain.PipelineStep
 	pipelineStepLog       string
@@ -77,6 +83,7 @@ type AppModel struct {
 	repoCursor            int
 	branchCursor          int
 	prCursor              int
+	prCommitCursor        int
 	pipelineCursor        int
 	pipelineStepCursor    int
 	pipelineStepLogCursor int
@@ -88,6 +95,9 @@ type AppModel struct {
 	selectedRepoSlug      string
 	selectedPipelineRef   string
 	selectedPipelineUUID  string
+	selectedPullRequestID int
+	selectedPullRequest   string
+	selectedCommitHash    string
 	selectedStepName      string
 	filterMode            bool
 	repoFilterQuery       string
@@ -109,6 +119,23 @@ type branchesLoadedMsg struct {
 type pullRequestsLoadedMsg struct {
 	prs []domain.PullRequest
 	err error
+}
+
+type prCommitsLoadedMsg struct {
+	commits []domain.Commit
+	err     error
+}
+
+type prCommitChangesLoadedMsg struct {
+	hash    string
+	changes []domain.CommitChange
+	err     error
+}
+
+type prCommitDiffLoadedMsg struct {
+	hash string
+	diff string
+	err  error
 }
 
 type pipelinesLoadedMsg struct {
@@ -149,12 +176,14 @@ func NewApp(workspace string, cfg config.Config) AppModel {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 	return AppModel{
-		workspace:   workspace,
-		client:      bitbucket.NewClient(cfg),
-		spinner:     s,
-		activePane:  repoPane,
-		currentView: noSelection,
-		loading:     true,
+		workspace:            workspace,
+		client:               bitbucket.NewClient(cfg),
+		spinner:              s,
+		activePane:           repoPane,
+		currentView:          noSelection,
+		loading:              true,
+		prCommitChangesCache: make(map[string][]domain.CommitChange),
+		prCommitDiffCache:    make(map[string]string),
 	}
 }
 
@@ -342,6 +371,44 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = ""
 		}
 
+	case prCommitsLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading commits: %v", msg.err)
+		} else {
+			m.prCommits = msg.commits
+			m.prCommitCursor = 0
+			m.prCommitChanges = nil
+			m.prCommitDiff = ""
+			m.selectedCommitHash = ""
+			m.message = ""
+			if cmd := updateSelectedCommitDetails(&m); cmd != nil {
+				return m, cmd
+			}
+		}
+
+	case prCommitChangesLoadedMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading commit changes: %v", msg.err)
+			break
+		}
+
+		m.prCommitChangesCache[msg.hash] = msg.changes
+		if msg.hash == m.selectedCommitHash {
+			m.prCommitChanges = msg.changes
+		}
+
+	case prCommitDiffLoadedMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading commit diff: %v", msg.err)
+			break
+		}
+
+		m.prCommitDiffCache[msg.hash] = msg.diff
+		if msg.hash == m.selectedCommitHash {
+			m.prCommitDiff = msg.diff
+		}
+
 	case pipelinesLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -451,7 +518,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.currentView == pipelinesView {
 					currentFilter = &m.pipelineFilterQuery
 					currentCursor = &m.pipelineCursor
-				} else if m.currentView == pipelineStepsView || m.currentView == pipelineStepLogView {
+				} else if m.currentView == prCommitsView || m.currentView == pipelineStepsView || m.currentView == pipelineStepLogView {
 					return m, nil
 				}
 			}
@@ -490,6 +557,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pipelineStepLog = ""
 				m.pipelineStepLogLines = nil
 				m.pipelineStepLogCursor = 0
+			} else if m.activePane == branchPane && m.currentView == prCommitsView {
+				m.currentView = prView
+				m.prCommits = nil
+				m.prCommitCursor = 0
+				m.prCommitChanges = nil
+				m.prCommitDiff = ""
+				m.selectedCommitHash = ""
 			} else if m.activePane == branchPane && m.currentView == pipelineStepsView {
 				m.currentView = pipelinesView
 				m.pipelineStepCursor = 0
@@ -500,7 +574,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "/":
-			if m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
+			if m.currentView != prCommitsView && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
 				m.filterMode = true
 			}
 
@@ -550,9 +624,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pipelineStepLogCursor = 0
 				return m, loadPipelineStepLog(m.client, m.selectedRepoSlug, m.selectedPipelineUUID, selectedStep.UUID)
 			}
+			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
+				filtered := m.getFilteredPRs()
+				selectedPR := filtered[m.prCursor]
+				m.selectedPullRequestID = selectedPR.ID
+				m.selectedPullRequest = selectedPR.Title
+				m.prCommitChangesCache = make(map[string][]domain.CommitChange)
+				m.prCommitDiffCache = make(map[string]string)
+				m.currentView = prCommitsView
+				m.loading = true
+				m.prCommits = nil
+				m.prCommitCursor = 0
+				m.prCommitChanges = nil
+				m.prCommitDiff = ""
+				m.selectedCommitHash = ""
+				return m, loadPullRequestCommits(m.client, m.selectedRepoSlug, selectedPR.ID)
+			}
 
 		case "h":
-			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
+			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != prCommitsView && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
 				switch m.currentView {
 				case branchesView:
 					m.currentView = prView
@@ -579,7 +669,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "l":
-			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
+			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != prCommitsView && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
 				switch m.currentView {
 				case prView:
 					m.currentView = branchesView
@@ -642,6 +732,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.prCursor++
 							cursorChanged = true
 						}
+					} else if m.currentView == prCommitsView {
+						if m.prCommitCursor < len(m.prCommits)-1 {
+							m.prCommitCursor++
+							cursorChanged = true
+						}
 					} else if m.currentView == pipelinesView {
 						filtered := m.getFilteredPipelines()
 						if m.pipelineCursor < len(filtered)-1 {
@@ -664,6 +759,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if cursorChanged && m.activePane == branchPane && m.currentView == pipelinesView && selectedRunningPipelineUUID(m) != "" {
 					return m, pollPipelineUpdates()
 				}
+				if cursorChanged && m.activePane == branchPane && m.currentView == prCommitsView {
+					if cmd := updateSelectedCommitDetails(&m); cmd != nil {
+						return m, cmd
+					}
+				}
 			}
 
 		case "k", "up":
@@ -683,6 +783,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if m.currentView == prView {
 						if m.prCursor > 0 {
 							m.prCursor--
+							cursorChanged = true
+						}
+					} else if m.currentView == prCommitsView {
+						if m.prCommitCursor > 0 {
+							m.prCommitCursor--
 							cursorChanged = true
 						}
 					} else if m.currentView == pipelinesView {
@@ -705,6 +810,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if cursorChanged && m.activePane == branchPane && m.currentView == pipelinesView && selectedRunningPipelineUUID(m) != "" {
 					return m, pollPipelineUpdates()
+				}
+				if cursorChanged && m.activePane == branchPane && m.currentView == prCommitsView {
+					if cmd := updateSelectedCommitDetails(&m); cmd != nil {
+						return m, cmd
+					}
 				}
 			}
 
@@ -742,6 +852,28 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "v":
+			if !m.filterMode && m.activePane == branchPane && m.currentView == prCommitsView {
+				if m.selectedCommitHash == "" {
+					m.message = "Select a commit first"
+					return m, nil
+				}
+
+				diff := strings.TrimSpace(m.prCommitDiff)
+				if diff == "" {
+					if _, ok := m.prCommitDiffCache[m.selectedCommitHash]; ok {
+						m.message = "No textual diff for selected commit"
+					} else {
+						m.message = "Diff is still loading"
+					}
+					return m, nil
+				}
+
+				ref := m.selectedCommitHash
+				if len(ref) > 12 {
+					ref = ref[:12]
+				}
+				return m, openLogInEditor(m.prCommitDiff, "commit-"+ref)
+			}
 			if !m.filterMode && m.activePane == branchPane && m.currentView == pipelineStepLogView && !m.loading {
 				return m, openLogInEditor(m.pipelineStepLog, m.selectedStepName)
 			}
@@ -759,6 +891,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.pullRequests = nil
 					m.prCursor = 0
 					return m, loadPullRequests(m.client, m.selectedRepoSlug)
+				case prCommitsView:
+					if m.selectedPullRequestID > 0 {
+						m.loading = true
+						m.prCommits = nil
+						m.prCommitCursor = 0
+						m.prCommitChanges = nil
+						m.prCommitDiff = ""
+						m.selectedCommitHash = ""
+						m.prCommitChangesCache = make(map[string][]domain.CommitChange)
+						m.prCommitDiffCache = make(map[string]string)
+						return m, loadPullRequestCommits(m.client, m.selectedRepoSlug, m.selectedPullRequestID)
+					}
 				case pipelinesView:
 					m.loading = true
 					m.pipelines = nil
@@ -811,7 +955,10 @@ func (m AppModel) View() string {
 		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == prView && m.activePane == branchPane {
-		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  o: open in browser  r: refresh  /: filter  q: quit"
+		helpText = "h/l: switch tabs  enter: view commits  esc: back  j/k/↑/↓: navigate  o: open in browser  r: refresh  /: filter  q: quit"
+	}
+	if m.currentView == prCommitsView && m.activePane == branchPane {
+		helpText = "esc: back to PRs  j/k/↑/↓: select commit  v: open diff in nvim/less  r: refresh  q: quit"
 	}
 	if m.currentView == pipelinesView && m.activePane == branchPane {
 		helpText = "h/l: switch tabs  enter: view steps  esc: back  j/k/↑/↓: navigate  r: refresh  /: filter  q: quit"
@@ -854,6 +1001,8 @@ func (m AppModel) renderRightPane() string {
 		return m.renderBranchPane()
 	} else if m.currentView == prView {
 		return m.renderPRPane()
+	} else if m.currentView == prCommitsView {
+		return m.renderPRCommitsPane()
 	} else if m.currentView == pipelinesView {
 		return m.renderPipelinePane()
 	} else if m.currentView == pipelineStepsView {
@@ -879,7 +1028,7 @@ func (m AppModel) renderRightTabs() string {
 	branchesTab := inactiveTab.Render("Branches")
 	pipelinesTab := inactiveTab.Render("Pipelines")
 
-	if m.currentView == prView {
+	if m.currentView == prView || m.currentView == prCommitsView {
 		prsTab = activeTab.Render("Pull Requests")
 	} else if m.currentView == branchesView {
 		branchesTab = activeTab.Render("Branches")
