@@ -1033,10 +1033,14 @@ func (m AppModel) renderPipelinePane() string {
 				resultBadge := formatPipelineResult(pipeline.Result)
 				created := shortTimestamp(pipeline.CreatedOn)
 				duration := pipelineDuration(pipeline.StartedOn, pipeline.CompletedOn)
+				ago := timeAgo(pipeline.CompletedOn)
 
-				line := fmt.Sprintf("%s #%d %s %s created:%s", cursor, pipeline.BuildNumber, stateBadge, resultBadge, created)
+				line := fmt.Sprintf("%s #%d %s %s created: %s", cursor, pipeline.BuildNumber, stateBadge, resultBadge, created)
 				if duration != "" {
-					line = fmt.Sprintf("%s duration:%s", line, duration)
+					line = fmt.Sprintf("%s duration: %s", line, duration)
+				}
+				if ago != "" {
+					line = fmt.Sprintf("%s completed: %s", line, ago)
 				}
 
 				items = append(items, line)
@@ -1320,6 +1324,44 @@ func pipelineDuration(startedOn, completedOn string) string {
 		return fmt.Sprintf("%dm", int(duration.Minutes()))
 	}
 	return fmt.Sprintf("%dh%dm", int(duration.Hours()), int(duration.Minutes())%60)
+}
+
+func timeAgo(completedOn string) string {
+	if completedOn == "" {
+		return ""
+	}
+
+	completedAt, err := time.Parse(time.RFC3339, completedOn)
+	if err != nil {
+		return ""
+	}
+
+	elapsed := time.Now().UTC().Sub(completedAt)
+	if elapsed < time.Minute {
+		return "just now"
+	}
+
+	if elapsed < time.Hour {
+		minutes := int(elapsed.Minutes())
+		if minutes == 1 {
+			return "1 min ago"
+		}
+		return fmt.Sprintf("%d mins ago", minutes)
+	}
+
+	if elapsed < 24*time.Hour {
+		hours := int(elapsed.Hours())
+		if hours == 1 {
+			return "1 hr ago"
+		}
+		return fmt.Sprintf("%d hrs ago", hours)
+	}
+
+	days := int(elapsed.Hours() / 24)
+	if days == 1 {
+		return "1 day ago"
+	}
+	return fmt.Sprintf("%d days ago", days)
 }
 
 func (m AppModel) getFilteredRepos() []domain.Repository {
