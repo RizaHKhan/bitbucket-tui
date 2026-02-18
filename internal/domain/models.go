@@ -42,6 +42,7 @@ type PullRequest struct {
 type Pipeline struct {
 	UUID        string
 	BuildNumber int
+	BranchName  string
 	State       string
 	Result      string
 	CreatedOn   string

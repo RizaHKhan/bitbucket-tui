@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"runtime"
@@ -133,6 +134,15 @@ type urlOpenedMsg struct {
 	err error
 }
 
+type pipelinePollTickMsg struct{}
+
+type pipelinePolledMsg struct {
+	pipeline domain.Pipeline
+	err      error
+}
+
+const pipelinePollInterval = 8 * time.Second
+
 func NewApp(workspace string, cfg config.Config) AppModel {
 	s := spinner.New()
 	s.Spinner = spinner.MiniDot
@@ -177,6 +187,19 @@ func loadPipelines(client *bitbucket.Client, repoSlug string) tea.Cmd {
 	return func() tea.Msg {
 		pipelines, err := client.ListPipelines(repoSlug)
 		return pipelinesLoadedMsg{pipelines: pipelines, err: err}
+	}
+}
+
+func pollPipelineUpdates() tea.Cmd {
+	return tea.Tick(pipelinePollInterval, func(time.Time) tea.Msg {
+		return pipelinePollTickMsg{}
+	})
+}
+
+func loadPipeline(client *bitbucket.Client, repoSlug, pipelineUUID string) tea.Cmd {
+	return func() tea.Msg {
+		pipeline, err := client.GetPipeline(repoSlug, pipelineUUID)
+		return pipelinePolledMsg{pipeline: pipeline, err: err}
 	}
 }
 
@@ -324,9 +347,48 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = fmt.Sprintf("Error loading pipelines: %v", msg.err)
 		} else {
+			previousCursor := m.pipelineCursor
 			m.pipelines = msg.pipelines
-			m.pipelineCursor = 0
+			if len(m.pipelines) == 0 {
+				m.pipelineCursor = 0
+			} else if previousCursor >= 0 && previousCursor < len(m.pipelines) {
+				m.pipelineCursor = previousCursor
+			} else {
+				m.pipelineCursor = len(m.pipelines) - 1
+			}
 			m.message = ""
+
+			if m.activePane == branchPane && m.currentView == pipelinesView && selectedRunningPipelineUUID(m) != "" {
+				return m, pollPipelineUpdates()
+			}
+		}
+
+	case pipelinePollTickMsg:
+		if m.activePane == branchPane && m.currentView == pipelinesView && m.selectedRepoSlug != "" {
+			pipelineUUID := selectedRunningPipelineUUID(m)
+			if pipelineUUID != "" {
+				return m, loadPipeline(m.client, m.selectedRepoSlug, pipelineUUID)
+			}
+		}
+
+	case pipelinePolledMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error polling pipeline: %v", msg.err)
+			if m.activePane == branchPane && m.currentView == pipelinesView && selectedRunningPipelineUUID(m) != "" {
+				return m, pollPipelineUpdates()
+			}
+			break
+		}
+
+		for i := range m.pipelines {
+			if m.pipelines[i].UUID == msg.pipeline.UUID {
+				m.pipelines[i] = msg.pipeline
+				break
+			}
+		}
+
+		if m.activePane == branchPane && m.currentView == pipelinesView && isPipelineRunning(msg.pipeline) {
+			return m, pollPipelineUpdates()
 		}
 
 	case pipelineStepsLoadedMsg:
@@ -434,6 +496,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pipelineSteps = nil
 			} else if m.activePane == branchPane {
 				m.activePane = repoPane
+				m.currentView = noSelection
 			}
 
 		case "/":
@@ -559,67 +622,89 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "j", "down":
 			if !m.filterMode {
+				cursorChanged := false
 				if m.activePane == repoPane {
 					filtered := m.getFilteredRepos()
 					if m.repoCursor < len(filtered)-1 {
 						m.repoCursor++
+						cursorChanged = true
 					}
 				} else {
 					if m.currentView == branchesView {
 						filtered := m.getFilteredBranches()
 						if m.branchCursor < len(filtered)-1 {
 							m.branchCursor++
+							cursorChanged = true
 						}
 					} else if m.currentView == prView {
 						filtered := m.getFilteredPRs()
 						if m.prCursor < len(filtered)-1 {
 							m.prCursor++
+							cursorChanged = true
 						}
 					} else if m.currentView == pipelinesView {
 						filtered := m.getFilteredPipelines()
 						if m.pipelineCursor < len(filtered)-1 {
 							m.pipelineCursor++
+							cursorChanged = true
 						}
 					} else if m.currentView == pipelineStepsView {
 						if m.pipelineStepCursor < len(m.pipelineSteps)-1 {
 							m.pipelineStepCursor++
+							cursorChanged = true
 						}
 					} else if m.currentView == pipelineStepLogView {
 						if m.pipelineStepLogCursor < len(m.pipelineStepLogLines)-1 {
 							m.pipelineStepLogCursor++
+							cursorChanged = true
 						}
 					}
+				}
+
+				if cursorChanged && m.activePane == branchPane && m.currentView == pipelinesView && selectedRunningPipelineUUID(m) != "" {
+					return m, pollPipelineUpdates()
 				}
 			}
 
 		case "k", "up":
 			if !m.filterMode {
+				cursorChanged := false
 				if m.activePane == repoPane {
 					if m.repoCursor > 0 {
 						m.repoCursor--
+						cursorChanged = true
 					}
 				} else {
 					if m.currentView == branchesView {
 						if m.branchCursor > 0 {
 							m.branchCursor--
+							cursorChanged = true
 						}
 					} else if m.currentView == prView {
 						if m.prCursor > 0 {
 							m.prCursor--
+							cursorChanged = true
 						}
 					} else if m.currentView == pipelinesView {
 						if m.pipelineCursor > 0 {
 							m.pipelineCursor--
+							cursorChanged = true
 						}
 					} else if m.currentView == pipelineStepsView {
 						if m.pipelineStepCursor > 0 {
 							m.pipelineStepCursor--
+							cursorChanged = true
 						}
 					} else if m.currentView == pipelineStepLogView {
 						if m.pipelineStepLogCursor > 0 {
 							m.pipelineStepLogCursor--
+							cursorChanged = true
 						}
 					}
+				}
+
+				if cursorChanged && m.activePane == branchPane && m.currentView == pipelinesView && selectedRunningPipelineUUID(m) != "" {
+					return m, pollPipelineUpdates()
 				}
 			}
 
@@ -863,8 +948,6 @@ func (m AppModel) renderRepoPane() string {
 	style := lipgloss.NewStyle().
 		Width(paneWidth).
 		Height(availableHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1)
 
 	return style.Render(content)
@@ -945,8 +1028,6 @@ func (m AppModel) renderBranchPane() string {
 	style := lipgloss.NewStyle().
 		Width(paneWidth).
 		Height(availableHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1)
 
 	return style.Render(content)
@@ -1040,8 +1121,6 @@ func (m AppModel) renderPRPane() string {
 	style := lipgloss.NewStyle().
 		Width(paneWidth).
 		Height(availableHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1)
 
 	return style.Render(content)
@@ -1071,8 +1150,9 @@ func (m AppModel) renderPipelinePane() string {
 	if m.selectedRepo != "" {
 		title = fmt.Sprintf("Pipelines (%s)", m.selectedRepo)
 	}
+	title = fmt.Sprintf("%s [develop/staging/main/master]", title)
 	if m.pipelineFilterQuery != "" {
-		title = fmt.Sprintf("Pipelines [/%s]", m.pipelineFilterQuery)
+		title = fmt.Sprintf("%s [/%s]", title, m.pipelineFilterQuery)
 	}
 	if !showRepoPane {
 		title = fmt.Sprintf("%s (esc: back)", title)
@@ -1096,7 +1176,11 @@ func (m AppModel) renderPipelinePane() string {
 	} else {
 		filtered := m.getFilteredPipelines()
 		if len(filtered) == 0 {
-			items = append(items, "No matches")
+			if m.pipelineFilterQuery == "" {
+				items = append(items, "No pipelines for tracked branches")
+			} else {
+				items = append(items, "No matches")
+			}
 		} else {
 			start, end := m.calculateWindow(m.pipelineCursor, len(filtered), availableHeight-3)
 
@@ -1109,11 +1193,12 @@ func (m AppModel) renderPipelinePane() string {
 
 				stateBadge := formatPipelineState(pipeline.State)
 				resultBadge := formatPipelineResult(pipeline.Result)
+				branch := renderPipelineBranchColumn(pipeline.BranchName)
 				created := shortTimestamp(pipeline.CreatedOn)
 				duration := pipelineDuration(pipeline.StartedOn, pipeline.CompletedOn)
 				ago := timeAgo(pipeline.CompletedOn)
 
-				line := fmt.Sprintf("%s #%d %s %s created: %s", cursor, pipeline.BuildNumber, stateBadge, resultBadge, created)
+				line := fmt.Sprintf("%s #%d %s %s %s created: %s", cursor, pipeline.BuildNumber, branch, stateBadge, resultBadge, created)
 				if duration != "" {
 					line = fmt.Sprintf("%s duration: %s", line, duration)
 				}
@@ -1137,8 +1222,6 @@ func (m AppModel) renderPipelinePane() string {
 	style := lipgloss.NewStyle().
 		Width(paneWidth).
 		Height(availableHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1)
 
 	return style.Render(content)
@@ -1221,8 +1304,6 @@ func (m AppModel) renderPipelineStepsPane() string {
 	style := lipgloss.NewStyle().
 		Width(paneWidth).
 		Height(availableHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1)
 
 	return style.Render(content)
@@ -1300,8 +1381,6 @@ func (m AppModel) renderPipelineStepLogPane() string {
 	style := lipgloss.NewStyle().
 		Width(paneWidth).
 		Height(availableHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1)
 
 	return style.Render(content)
@@ -1357,6 +1436,29 @@ func formatPipelineResult(result string) string {
 	default:
 		return fmt.Sprintf("[%s]", strings.ToUpper(result))
 	}
+}
+
+func selectedRunningPipelineUUID(m AppModel) string {
+	if m.activePane != branchPane || m.currentView != pipelinesView {
+		return ""
+	}
+
+	filtered := m.getFilteredPipelines()
+	if len(filtered) == 0 || m.pipelineCursor < 0 || m.pipelineCursor >= len(filtered) {
+		return ""
+	}
+
+	selected := filtered[m.pipelineCursor]
+	if !isPipelineRunning(selected) {
+		return ""
+	}
+
+	return selected.UUID
+}
+
+func isPipelineRunning(pipeline domain.Pipeline) bool {
+	state := strings.ToLower(strings.TrimSpace(pipeline.State))
+	return state == "in_progress" || state == "running"
 }
 
 func shortTimestamp(value string) string {
@@ -1491,21 +1593,82 @@ func (m AppModel) getFilteredPRs() []domain.PullRequest {
 }
 
 func (m AppModel) getFilteredPipelines() []domain.Pipeline {
-	if m.pipelineFilterQuery == "" {
-		return m.pipelines
+	query := strings.ToLower(m.pipelineFilterQuery)
+	if query == "" {
+		var tracked []domain.Pipeline
+		for _, pipeline := range m.pipelines {
+			if isTrackedPipelineBranch(pipeline.BranchName) {
+				tracked = append(tracked, pipeline)
+			}
+		}
+		return tracked
 	}
 
 	var filtered []domain.Pipeline
-	query := strings.ToLower(m.pipelineFilterQuery)
 	for _, pipeline := range m.pipelines {
+		if !isTrackedPipelineBranch(pipeline.BranchName) {
+			continue
+		}
+
 		buildNumber := fmt.Sprintf("%d", pipeline.BuildNumber)
 		if strings.Contains(strings.ToLower(pipeline.State), query) ||
 			strings.Contains(strings.ToLower(pipeline.Result), query) ||
-			strings.Contains(strings.ToLower(buildNumber), query) {
+			strings.Contains(strings.ToLower(buildNumber), query) ||
+			strings.Contains(strings.ToLower(pipeline.BranchName), query) {
 			filtered = append(filtered, pipeline)
 		}
 	}
 	return filtered
+}
+
+func isTrackedPipelineBranch(branchName string) bool {
+	branch := strings.ToLower(formatPipelineBranch(branchName))
+	switch branch {
+	case "develop", "staging", "main", "master":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatPipelineBranch(branchName string) string {
+	branch := strings.TrimSpace(branchName)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	branch = strings.TrimPrefix(branch, "/")
+	if branch == "" {
+		return "-"
+	}
+	return branch
+}
+
+func renderPipelineBranchColumn(branchName string) string {
+	branch := formatPipelineBranch(branchName)
+	color := pipelineBranchColor(branch)
+
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(color)).
+		Width(12).
+		Render(branch)
+}
+
+func pipelineBranchColor(branch string) string {
+	switch strings.ToLower(strings.TrimSpace(branch)) {
+	case "develop":
+		return "45"
+	case "staging":
+		return "220"
+	case "main":
+		return "42"
+	case "master":
+		return "39"
+	case "-":
+		return "241"
+	}
+
+	palette := []string{"33", "69", "81", "111", "147", "177", "207", "214", "179", "44", "75", "109"}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(branch))
+	return palette[h.Sum32()%uint32(len(palette))]
 }
 
 func (m AppModel) calculateWindow(cursor, total, height int) (int, int) {

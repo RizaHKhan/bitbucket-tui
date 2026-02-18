@@ -7,6 +7,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"sort"
+	"strings"
 
 	"bitbucket-cli/internal/config"
 	"bitbucket-cli/internal/domain"
@@ -106,7 +107,10 @@ type apiPipeline struct {
 	BuildNumber int    `json:"build_number"`
 	CreatedOn   string `json:"created_on"`
 	CompletedOn string `json:"completed_on"`
-	State       struct {
+	Target      struct {
+		RefName string `json:"ref_name"`
+	} `json:"target"`
+	State struct {
 		Name  string `json:"name"`
 		Stage struct {
 			Name      string `json:"name"`
@@ -372,18 +376,44 @@ func (c *Client) ListPipelines(repoSlug string) ([]domain.Pipeline, error) {
 
 	pipelines := make([]domain.Pipeline, 0, len(decoded.Values))
 	for _, item := range decoded.Values {
-		pipelines = append(pipelines, domain.Pipeline{
-			UUID:        item.UUID,
-			BuildNumber: item.BuildNumber,
-			State:       item.State.Name,
-			Result:      item.State.Result.Name,
-			CreatedOn:   item.CreatedOn,
-			StartedOn:   item.State.Stage.StartedOn,
-			CompletedOn: item.CompletedOn,
-		})
+		pipelines = append(pipelines, mapAPIPipeline(item))
 	}
 
 	return pipelines, nil
+}
+
+func (c *Client) GetPipeline(repoSlug, pipelineUUID string) (domain.Pipeline, error) {
+	escapedUUID := neturl.PathEscape(pipelineUUID)
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pipelines/%s", c.config.Workspace, repoSlug, escapedUUID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return domain.Pipeline{}, err
+	}
+
+	setJSONHeaders(req, c.config.BasicAuth)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return domain.Pipeline{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return domain.Pipeline{}, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return domain.Pipeline{}, fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	var decoded apiPipeline
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return domain.Pipeline{}, fmt.Errorf("unable to decode pipeline response: %w", err)
+	}
+
+	return mapAPIPipeline(decoded), nil
 }
 
 func (c *Client) ListPipelineSteps(repoSlug, pipelineUUID string) ([]domain.PipelineStep, error) {
@@ -473,4 +503,22 @@ func setJSONHeaders(req *http.Request, authValue string) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", authValue)
+}
+
+func mapAPIPipeline(item apiPipeline) domain.Pipeline {
+	stateName := item.State.Name
+	if strings.EqualFold(strings.TrimSpace(item.State.Result.Name), "paused") {
+		stateName = "paused"
+	}
+
+	return domain.Pipeline{
+		UUID:        item.UUID,
+		BuildNumber: item.BuildNumber,
+		BranchName:  item.Target.RefName,
+		State:       stateName,
+		Result:      item.State.Result.Name,
+		CreatedOn:   item.CreatedOn,
+		StartedOn:   item.State.Stage.StartedOn,
+		CompletedOn: item.CompletedOn,
+	}
 }
