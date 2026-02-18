@@ -87,6 +87,9 @@ type apiPullRequest struct {
 	CreatedOn string `json:"created_on"`
 	UpdatedOn string `json:"updated_on"`
 	Links     struct {
+		Self struct {
+			Href string `json:"href"`
+		} `json:"self"`
 		HTML struct {
 			Href string `json:"href"`
 		} `json:"html"`
@@ -312,6 +315,11 @@ func (c *Client) ListPullRequests(repoSlug string) ([]domain.PullRequest, error)
 		}
 
 		for _, item := range decoded.Values {
+			prURL := item.Links.HTML.Href
+			if prURL == "" {
+				prURL = item.Links.Self.Href
+			}
+
 			allPRs = append(allPRs, domain.PullRequest{
 				ID:           item.ID,
 				Title:        item.Title,
@@ -323,7 +331,7 @@ func (c *Client) ListPullRequests(repoSlug string) ([]domain.PullRequest, error)
 				DestBranch:   item.Destination.Branch.Name,
 				CreatedOn:    item.CreatedOn,
 				UpdatedOn:    item.UpdatedOn,
-				URL:          item.Links.HTML.Href,
+				URL:          prURL,
 			})
 		}
 

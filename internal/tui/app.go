@@ -129,6 +129,10 @@ type editorClosedMsg struct {
 	err error
 }
 
+type urlOpenedMsg struct {
+	err error
+}
+
 func NewApp(workspace string, cfg config.Config) AppModel {
 	s := spinner.New()
 	s.Spinner = spinner.MiniDot
@@ -192,19 +196,51 @@ func loadPipelineStepLog(client *bitbucket.Client, repoSlug, pipelineUUID, stepU
 
 func openURL(url string) tea.Cmd {
 	return func() tea.Msg {
-		var cmd *exec.Cmd
+		var commands [][]string
 		switch runtime.GOOS {
 		case "linux":
-			cmd = exec.Command("xdg-open", url)
+			commands = [][]string{
+				{"xdg-open", url},
+				{"gio", "open", url},
+				{"wslview", url},
+				{"cmd.exe", "/c", "start", "", url},
+				{"powershell.exe", "-NoProfile", "-Command", "Start-Process", url},
+			}
 		case "darwin":
-			cmd = exec.Command("open", url)
+			commands = [][]string{{"open", url}}
 		case "windows":
-			cmd = exec.Command("cmd", "/c", "start", url)
+			commands = [][]string{{"cmd", "/c", "start", "", url}}
 		default:
-			return nil
+			return urlOpenedMsg{err: fmt.Errorf("opening URLs is not supported on %s", runtime.GOOS)}
 		}
-		_ = cmd.Start()
-		return nil
+
+		var lastErr error
+		for _, parts := range commands {
+			if _, err := exec.LookPath(parts[0]); err != nil {
+				lastErr = err
+				continue
+			}
+
+			cmd := exec.Command(parts[0], parts[1:]...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				trimmedOutput := strings.TrimSpace(string(output))
+				if trimmedOutput != "" {
+					lastErr = fmt.Errorf("%s failed: %w (%s)", parts[0], err, trimmedOutput)
+				} else {
+					lastErr = fmt.Errorf("%s failed: %w", parts[0], err)
+				}
+				continue
+			}
+
+			return urlOpenedMsg{}
+		}
+
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no URL opener found")
+		}
+
+		return urlOpenedMsg{err: lastErr}
 	}
 }
 
@@ -323,6 +359,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = fmt.Sprintf("Editor error: %v", msg.err)
 		} else {
 			m.message = "Closed log viewer"
+		}
+
+	case urlOpenedMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Open URL error: %v", msg.err)
+		} else {
+			m.message = "Opened PR in browser"
 		}
 
 	case spinner.TickMsg:
@@ -599,14 +642,51 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
 				filtered := m.getFilteredPRs()
 				selectedPR := filtered[m.prCursor]
-				if selectedPR.URL != "" {
-					return m, openURL(selectedPR.URL)
+				prURL := strings.TrimSpace(selectedPR.URL)
+				if !strings.HasPrefix(prURL, "https://") && !strings.HasPrefix(prURL, "http://") {
+					prURL = ""
 				}
+				if prURL == "" && selectedPR.ID > 0 && m.workspace != "" && m.selectedRepoSlug != "" {
+					prURL = fmt.Sprintf("https://bitbucket.org/%s/%s/pull-requests/%d", m.workspace, m.selectedRepoSlug, selectedPR.ID)
+				}
+				if prURL != "" {
+					return m, openURL(prURL)
+				}
+				m.message = "Selected PR has no URL"
+				return m, nil
 			}
 
 		case "v":
 			if !m.filterMode && m.activePane == branchPane && m.currentView == pipelineStepLogView && !m.loading {
 				return m, openLogInEditor(m.pipelineStepLog, m.selectedStepName)
+			}
+
+		case "r":
+			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" {
+				switch m.currentView {
+				case branchesView:
+					m.loading = true
+					m.branches = nil
+					m.branchCursor = 0
+					return m, loadBranches(m.client, m.selectedRepoSlug)
+				case prView:
+					m.loading = true
+					m.pullRequests = nil
+					m.prCursor = 0
+					return m, loadPullRequests(m.client, m.selectedRepoSlug)
+				case pipelinesView:
+					m.loading = true
+					m.pipelines = nil
+					m.pipelineCursor = 0
+					return m, loadPipelines(m.client, m.selectedRepoSlug)
+				case pipelineStepsView:
+					if m.selectedPipelineUUID != "" {
+						m.loading = true
+						m.pipelineSteps = nil
+						m.pipelineStepCursor = 0
+						return m, loadPipelineSteps(m.client, m.selectedRepoSlug, m.selectedPipelineUUID)
+					}
+				}
 			}
 		}
 	}
@@ -643,16 +723,16 @@ func (m AppModel) View() string {
 
 	helpText := "j/k/↑/↓: navigate  enter: select repo  /: filter  q: quit"
 	if m.currentView != noSelection && m.activePane == branchPane {
-		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  /: filter  q: quit"
+		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == prView && m.activePane == branchPane {
-		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  o: open in browser  /: filter  q: quit"
+		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  o: open in browser  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == pipelinesView && m.activePane == branchPane {
-		helpText = "h/l: switch tabs  enter: view steps  esc: back  j/k/↑/↓: navigate  /: filter  q: quit"
+		helpText = "h/l: switch tabs  enter: view steps  esc: back  j/k/↑/↓: navigate  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == pipelineStepsView && m.activePane == branchPane {
-		helpText = "enter: view logs  esc: back to pipelines  j/k/↑/↓: navigate  q: quit"
+		helpText = "enter: view logs  esc: back to pipelines  j/k/↑/↓: navigate  r: refresh  q: quit"
 	}
 	if m.currentView == pipelineStepLogView && m.activePane == branchPane {
 		helpText = "v: open in nvim/less  esc: back to steps  j/k/↑/↓: scroll logs  q: quit"
