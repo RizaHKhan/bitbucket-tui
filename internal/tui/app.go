@@ -473,9 +473,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "l":
-			if !m.filterMode && m.activePane == repoPane && m.currentView != noSelection {
-				m.activePane = branchPane
-			} else if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
+			if !m.filterMode && m.activePane == branchPane && m.selectedRepoSlug != "" && m.currentView != pipelineStepsView && m.currentView != pipelineStepLogView {
 				switch m.currentView {
 				case prView:
 					m.currentView = branchesView
@@ -644,7 +642,7 @@ func (m AppModel) View() string {
 	}
 
 	helpText := "j/k/↑/↓: navigate  enter: select repo  /: filter  q: quit"
-	if m.currentView != noSelection {
+	if m.currentView != noSelection && m.activePane == branchPane {
 		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  /: filter  q: quit"
 	}
 	if m.currentView == prView && m.activePane == branchPane {
