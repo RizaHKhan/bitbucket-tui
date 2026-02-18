@@ -105,6 +105,12 @@ type apiPullRequest struct {
 			Href string `json:"href"`
 		} `json:"html"`
 	} `json:"links"`
+	Participants []struct {
+		Approved bool `json:"approved"`
+		User     struct {
+			DisplayName string `json:"display_name"`
+		} `json:"user"`
+	} `json:"participants"`
 }
 
 type apiCommit struct {
@@ -322,7 +328,11 @@ func (c *Client) ListBranches(repoSlug string) ([]domain.Branch, error) {
 
 func (c *Client) ListPullRequests(repoSlug string) ([]domain.PullRequest, error) {
 	var allPRs []domain.PullRequest
-	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests?pagelen=50", c.config.Workspace, repoSlug)
+	url := fmt.Sprintf(
+		"https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests?pagelen=50&fields=values.id,values.title,values.description,values.state,values.draft,values.author.display_name,values.source.branch.name,values.destination.branch.name,values.created_on,values.updated_on,values.links.html.href,values.links.self.href,values.participants.approved,values.participants.user.display_name,next",
+		c.config.Workspace,
+		repoSlug,
+	)
 
 	for url != "" {
 		req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -358,18 +368,33 @@ func (c *Client) ListPullRequests(repoSlug string) ([]domain.PullRequest, error)
 				prURL = item.Links.Self.Href
 			}
 
+			approvalCount := 0
+			approverNames := make([]string, 0, len(item.Participants))
+			for _, participant := range item.Participants {
+				if participant.Approved {
+					approvalCount++
+					name := strings.TrimSpace(participant.User.DisplayName)
+					if name != "" {
+						approverNames = append(approverNames, name)
+					}
+				}
+			}
+
 			allPRs = append(allPRs, domain.PullRequest{
-				ID:           item.ID,
-				Title:        item.Title,
-				Description:  item.Description,
-				State:        item.State,
-				Draft:        item.Draft,
-				Author:       item.Author.DisplayName,
-				SourceBranch: item.Source.Branch.Name,
-				DestBranch:   item.Destination.Branch.Name,
-				CreatedOn:    item.CreatedOn,
-				UpdatedOn:    item.UpdatedOn,
-				URL:          prURL,
+				ID:            item.ID,
+				Title:         item.Title,
+				Description:   item.Description,
+				State:         item.State,
+				Draft:         item.Draft,
+				Approved:      approvalCount > 0,
+				Approvals:     approvalCount,
+				ApproverNames: approverNames,
+				Author:        item.Author.DisplayName,
+				SourceBranch:  item.Source.Branch.Name,
+				DestBranch:    item.Destination.Branch.Name,
+				CreatedOn:     item.CreatedOn,
+				UpdatedOn:     item.UpdatedOn,
+				URL:           prURL,
 			})
 		}
 
@@ -414,6 +439,70 @@ func (c *Client) ListPipelines(repoSlug string) ([]domain.Pipeline, error) {
 	}
 
 	return pipelines, nil
+}
+
+func (c *Client) ApprovePullRequest(repoSlug string, pullRequestID int) error {
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests/%d/approve", c.config.Workspace, repoSlug, pullRequestID)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", c.config.BasicAuth)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseText := strings.ToLower(strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusBadRequest && strings.Contains(responseText, "already approved") {
+			return nil
+		}
+		return fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+func (c *Client) UnapprovePullRequest(repoSlug string, pullRequestID int) error {
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests/%d/approve", c.config.Workspace, repoSlug, pullRequestID)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", c.config.BasicAuth)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseText := strings.ToLower(strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusBadRequest && (strings.Contains(responseText, "not approved") || strings.Contains(responseText, "has not approved")) {
+			return nil
+		}
+		return fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 func (c *Client) ListPullRequestCommits(repoSlug string, pullRequestID int) ([]domain.Commit, error) {

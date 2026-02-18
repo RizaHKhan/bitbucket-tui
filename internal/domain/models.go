@@ -26,17 +26,20 @@ type BranchTarget struct {
 }
 
 type PullRequest struct {
-	ID           int
-	Title        string
-	Description  string
-	State        string
-	Draft        bool
-	Author       string
-	SourceBranch string
-	DestBranch   string
-	CreatedOn    string
-	UpdatedOn    string
-	URL          string
+	ID            int
+	Title         string
+	Description   string
+	State         string
+	Draft         bool
+	Approved      bool
+	Approvals     int
+	ApproverNames []string
+	Author        string
+	SourceBranch  string
+	DestBranch    string
+	CreatedOn     string
+	UpdatedOn     string
+	URL           string
 }
 
 type Commit struct {

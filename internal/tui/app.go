@@ -121,6 +121,12 @@ type pullRequestsLoadedMsg struct {
 	err error
 }
 
+type prApprovalUpdatedMsg struct {
+	pullRequestID int
+	approved      bool
+	err           error
+}
+
 type prCommitsLoadedMsg struct {
 	commits []domain.Commit
 	err     error
@@ -209,6 +215,20 @@ func loadPullRequests(client *bitbucket.Client, repoSlug string) tea.Cmd {
 	return func() tea.Msg {
 		prs, err := client.ListPullRequests(repoSlug)
 		return pullRequestsLoadedMsg{prs: prs, err: err}
+	}
+}
+
+func approvePullRequest(client *bitbucket.Client, repoSlug string, pullRequestID int) tea.Cmd {
+	return func() tea.Msg {
+		err := client.ApprovePullRequest(repoSlug, pullRequestID)
+		return prApprovalUpdatedMsg{pullRequestID: pullRequestID, approved: true, err: err}
+	}
+}
+
+func unapprovePullRequest(client *bitbucket.Client, repoSlug string, pullRequestID int) tea.Cmd {
+	return func() tea.Msg {
+		err := client.UnapprovePullRequest(repoSlug, pullRequestID)
+		return prApprovalUpdatedMsg{pullRequestID: pullRequestID, approved: false, err: err}
 	}
 }
 
@@ -369,6 +389,43 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pullRequests = msg.prs
 			m.prCursor = 0
 			m.message = ""
+		}
+
+	case prApprovalUpdatedMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error updating approval: %v", msg.err)
+			break
+		}
+
+		for i := range m.pullRequests {
+			if m.pullRequests[i].ID != msg.pullRequestID {
+				continue
+			}
+
+			if msg.approved {
+				if m.pullRequests[i].Approvals <= 0 {
+					m.pullRequests[i].Approvals = 1
+				}
+				m.pullRequests[i].Approved = true
+				if len(m.pullRequests[i].ApproverNames) == 0 {
+					m.pullRequests[i].ApproverNames = []string{"you"}
+				}
+			} else {
+				if m.pullRequests[i].Approvals > 0 {
+					m.pullRequests[i].Approvals--
+				}
+				m.pullRequests[i].Approved = m.pullRequests[i].Approvals > 0
+				if len(m.pullRequests[i].ApproverNames) > 0 {
+					m.pullRequests[i].ApproverNames = nil
+				}
+			}
+			break
+		}
+
+		if msg.approved {
+			m.message = fmt.Sprintf("Approved PR #%d", msg.pullRequestID)
+		} else {
+			m.message = fmt.Sprintf("Unapproved PR #%d", msg.pullRequestID)
 		}
 
 	case prCommitsLoadedMsg:
@@ -851,6 +908,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case "a":
+			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
+				selectedPR := m.getFilteredPRs()[m.prCursor]
+				return m, approvePullRequest(m.client, m.selectedRepoSlug, selectedPR.ID)
+			}
+
+		case "u":
+			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
+				selectedPR := m.getFilteredPRs()[m.prCursor]
+				return m, unapprovePullRequest(m.client, m.selectedRepoSlug, selectedPR.ID)
+			}
+
 		case "v":
 			if !m.filterMode && m.activePane == branchPane && m.currentView == prCommitsView {
 				if m.selectedCommitHash == "" {
@@ -955,7 +1024,7 @@ func (m AppModel) View() string {
 		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == prView && m.activePane == branchPane {
-		helpText = "h/l: switch tabs  enter: view commits  esc: back  j/k/↑/↓: navigate  o: open in browser  r: refresh  /: filter  q: quit"
+		helpText = "h/l: switch tabs  enter: view commits  a/u: approve/unapprove  esc: back  j/k/↑/↓: navigate  o: open in browser  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == prCommitsView && m.activePane == branchPane {
 		helpText = "esc: back to PRs  j/k/↑/↓: select commit  v: open diff in nvim/less  r: refresh  q: quit"
@@ -1233,7 +1302,11 @@ func (m AppModel) renderPRPane() string {
 		if len(filtered) == 0 {
 			items = append(items, "No matches")
 		} else {
-			start, end := m.calculateWindow(m.prCursor, len(filtered), availableHeight-3)
+			visiblePRRows := (availableHeight - 3) / 2
+			if visiblePRRows < 1 {
+				visiblePRRows = 1
+			}
+			start, end := m.calculateWindow(m.prCursor, len(filtered), visiblePRRows)
 
 			for i := start; i < end; i++ {
 				pr := filtered[i]
@@ -1241,20 +1314,34 @@ func (m AppModel) renderPRPane() string {
 				if m.activePane == branchPane && i == m.prCursor {
 					cursor = cursorStyle.Render(">")
 				}
-
 				stateBadge := formatPRState(pr.State, pr.Draft)
+				leftBorder := renderPRLeftBorder(pr)
 
 				authorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
 				author := authorStyle.Render(fmt.Sprintf("@%s", pr.Author))
 
-				const cursorIDStateAuthorPadding = 35
+				const cursorIDStateAuthorPadding = 40
 				maxTitleWidth := paneWidth - cursorIDStateAuthorPadding - len(pr.Author)
 				prTitle := pr.Title
 				if len(prTitle) > maxTitleWidth {
 					prTitle = prTitle[:maxTitleWidth-3] + "..."
 				}
 
-				items = append(items, fmt.Sprintf("%s #%d %s %s %s", cursor, pr.ID, stateBadge, author, prTitle))
+				mainLine := fmt.Sprintf("%s %s #%d", leftBorder, cursor, pr.ID)
+				if stateBadge != "" {
+					mainLine = fmt.Sprintf("%s %s", mainLine, stateBadge)
+				}
+				mainLine = fmt.Sprintf("%s %s %s", mainLine, author, prTitle)
+				items = append(items, mainLine)
+
+				if len(pr.ApproverNames) > 0 {
+					approversText := fmt.Sprintf("%s   approvers: %s", leftBorder, renderApproverNames(pr.ApproverNames))
+					items = append(items, approversText)
+				}
+
+				if i < end-1 {
+					items = append(items, "")
+				}
 			}
 
 			if start > 0 {
@@ -1538,10 +1625,7 @@ func (m AppModel) renderPipelineStepLogPane() string {
 func formatPRState(state string, draft bool) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "open":
-		if draft {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[DRAFT]")
-		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("[OPEN]")
+		return ""
 	case "merged":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Render("[MERGED]")
 	case "declined":
@@ -1551,6 +1635,42 @@ func formatPRState(state string, draft bool) string {
 	default:
 		return fmt.Sprintf("[%s]", strings.ToUpper(state))
 	}
+}
+
+func renderPRLeftBorder(pr domain.PullRequest) string {
+	state := strings.ToLower(strings.TrimSpace(pr.State))
+	if state == "open" {
+		if pr.Draft {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("▌")
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("▌")
+	}
+
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("▌")
+}
+
+func renderApproverNames(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+
+	colored := make([]string, 0, len(names))
+	for _, name := range names {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		colored = append(colored, lipgloss.NewStyle().Foreground(lipgloss.Color(approverColor(trimmed))).Render(trimmed))
+	}
+
+	return strings.Join(colored, ", ")
+}
+
+func approverColor(name string) string {
+	palette := []string{"33", "45", "69", "81", "111", "147", "177", "207", "214", "179", "44", "75", "109"}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
+	return palette[h.Sum32()%uint32(len(palette))]
 }
 
 func formatPipelineState(state string) string {
