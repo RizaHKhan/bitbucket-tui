@@ -144,6 +144,12 @@ type prCommitDiffLoadedMsg struct {
 	err  error
 }
 
+type prDiffLoadedMsg struct {
+	prID int
+	diff string
+	err  error
+}
+
 type pipelinesLoadedMsg struct {
 	pipelines []domain.Pipeline
 	err       error
@@ -249,6 +255,13 @@ func loadPipeline(client *bitbucket.Client, repoSlug, pipelineUUID string) tea.C
 	return func() tea.Msg {
 		pipeline, err := client.GetPipeline(repoSlug, pipelineUUID)
 		return pipelinePolledMsg{pipeline: pipeline, err: err}
+	}
+}
+
+func loadPullRequestDiff(client *bitbucket.Client, repoSlug string, pullRequestID int) tea.Cmd {
+	return func() tea.Msg {
+		diff, err := client.GetPullRequestDiff(repoSlug, pullRequestID)
+		return prDiffLoadedMsg{prID: pullRequestID, diff: diff, err: err}
 	}
 }
 
@@ -465,6 +478,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.hash == m.selectedCommitHash {
 			m.prCommitDiff = msg.diff
 		}
+
+	case prDiffLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Error loading PR diff: %v", msg.err)
+			break
+		}
+
+		diff := strings.TrimSpace(msg.diff)
+		if diff == "" {
+			m.message = fmt.Sprintf("PR #%d has no textual diff", msg.prID)
+			break
+		}
+
+		return m, openLogInEditor(msg.diff, fmt.Sprintf("pr-%d-diff", msg.prID))
 
 	case pipelinesLoadedMsg:
 		m.loading = false
@@ -908,6 +936,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case "d":
+			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
+				selectedPR := m.getFilteredPRs()[m.prCursor]
+				if selectedPR.ID <= 0 || strings.TrimSpace(m.selectedRepoSlug) == "" {
+					m.message = "Unable to load PR diff for selected PR"
+					return m, nil
+				}
+
+				m.loading = true
+				m.message = fmt.Sprintf("Loading PR #%d diff...", selectedPR.ID)
+				return m, loadPullRequestDiff(m.client, m.selectedRepoSlug, selectedPR.ID)
+			}
+
 		case "a":
 			if !m.filterMode && m.activePane == branchPane && m.currentView == prView && len(m.getFilteredPRs()) > 0 {
 				selectedPR := m.getFilteredPRs()[m.prCursor]
@@ -1024,7 +1065,7 @@ func (m AppModel) View() string {
 		helpText = "h/l: switch tabs  esc: back  j/k/↑/↓: navigate  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == prView && m.activePane == branchPane {
-		helpText = "h/l: switch tabs  enter: view commits  a/u: approve/unapprove  esc: back  j/k/↑/↓: navigate  o: open in browser  r: refresh  /: filter  q: quit"
+		helpText = "h/l: switch tabs  enter: view commits  a/u: approve/unapprove  esc: back  j/k/↑/↓: navigate  d: open diff o: open in browser  r: refresh  /: filter  q: quit"
 	}
 	if m.currentView == prCommitsView && m.activePane == branchPane {
 		helpText = "esc: back to PRs  j/k/↑/↓: select commit  v: open diff in nvim/less  r: refresh  q: quit"

@@ -640,6 +640,35 @@ func (c *Client) GetCommitDiff(repoSlug, commitHash string) (string, error) {
 	return string(body), nil
 }
 
+func (c *Client) GetPullRequestDiff(repoSlug string, pullRequestID int) (string, error) {
+	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests/%d/diff", c.config.Workspace, repoSlug, pullRequestID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", c.config.BasicAuth)
+	req.Header.Set("Accept", "text/plain")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("non-success status code: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	return string(body), nil
+}
+
 func (c *Client) GetPipeline(repoSlug, pipelineUUID string) (domain.Pipeline, error) {
 	escapedUUID := neturl.PathEscape(pipelineUUID)
 	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pipelines/%s", c.config.Workspace, repoSlug, escapedUUID)
