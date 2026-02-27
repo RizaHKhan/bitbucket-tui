@@ -1193,10 +1193,10 @@ func (m AppModel) renderBranchPane() string {
 
 	title := "Branches"
 	if m.selectedRepo != "" {
-		title = fmt.Sprintf("Branches (%s)", m.selectedRepo)
+		title = fmt.Sprintf("(%s)", m.selectedRepo)
 	}
 	if m.branchFilterQuery != "" {
-		title = fmt.Sprintf("Branches [/%s]", m.branchFilterQuery)
+		title = fmt.Sprintf("[/%s]", m.branchFilterQuery)
 	}
 	if !showRepoPane {
 		title = fmt.Sprintf("%s (esc: back)", title)
@@ -1273,10 +1273,10 @@ func (m AppModel) renderPRPane() string {
 
 	title := "Pull Requests"
 	if m.selectedRepo != "" {
-		title = fmt.Sprintf("Pull Requests (%s)", m.selectedRepo)
+		title = fmt.Sprintf("(%s)", m.selectedRepo)
 	}
 	if m.prFilterQuery != "" {
-		title = fmt.Sprintf("Pull Requests [/%s]", m.prFilterQuery)
+		title = fmt.Sprintf("[/%s]", m.prFilterQuery)
 	}
 	if !showRepoPane {
 		title = fmt.Sprintf("%s (esc: back)", title)
@@ -1384,7 +1384,7 @@ func (m AppModel) renderPipelinePane() string {
 
 	title := "Pipelines"
 	if m.selectedRepo != "" {
-		title = fmt.Sprintf("Pipelines (%s)", m.selectedRepo)
+		title = fmt.Sprintf("(%s)", m.selectedRepo)
 	}
 	title = fmt.Sprintf("%s [develop/staging/main/master]", title)
 	if m.pipelineFilterQuery != "" {
